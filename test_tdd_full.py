@@ -21,16 +21,16 @@ if __name__ == "__main__":
     # demo
     device = torch.device('cuda:1')
     is_U2D = 0
-    prev_path = "./test_data/H_U_his_test.mat"  # path of dataset [H_U_his_test]
-    pred_path = "./test_data/H_U_pre_test.mat"  # path of dataset [H_U_pre_test]
-    pred_path_fdd = "./test_data/H_D_pre_test.mat"  # path of dataset [H_D_pre_test]
+    prev_path = "../Dataset/test_data/H_U_his_test.mat"  # path of dataset [H_U_his_test]
+    pred_path = "../Dataset/test_data/H_U_pre_test.mat"  # path of dataset [H_U_pre_test]
+    pred_path_fdd = "../Dataset/test_data/H_D_pre_test.mat"  # path of dataset [H_D_pre_test]
     model_path = {
-        'gpt': './Weights/full_shot_tdd/U2U_LLM4CP.pth',
-        'transformer': './Weights/full_shot_tdd/U2U_trans.pth',
-        'cnn': './Weights/full_shot_tdd/U2U_cnn.pth',
-        'gru': './Weights/full_shot_tdd/U2U_gru.pth',
-        'lstm': './Weights/full_shot_tdd/U2U_lstm.pth',
-        'rnn': './Weights/full_shot_tdd/U2U_rnn.pth'
+        'gpt': '../Weights/full_shot_tdd/U2U_LLM4CP.pth',
+        'transformer': '../Weights/full_shot_tdd/U2U_trans.pth',
+        'cnn': '../Weights/full_shot_tdd/U2U_cnn.pth',
+        'gru': '../Weights/full_shot_tdd/U2U_gru.pth',
+        'lstm': '../Weights/full_shot_tdd/U2U_lstm.pth',
+        'rnn': '../Weights/full_shot_tdd/U2U_rnn.pth'
     }
     model_test_enable = ['gpt', 'transformer', 'cnn', 'gru', 'lstm', 'rnn', 'np', 'pad']
     prev_len = 16
