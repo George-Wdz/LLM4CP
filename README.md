@@ -93,6 +93,11 @@ Use the enhanced pipeline (documented in `docs/fine_tuning.md`) to fine-tune LLM
 
 For additional knobs (custom jammer JSON configs, LoRA/PEFT tips, etc.) see `docs/fine_tuning.md`.
 
+## Documentation
+
+- **[Noise Detection and Channel Prediction Design](docs/noise_detection_design.md)** (Chinese & English): Comprehensive guide explaining the noise and interference handling strategy, U2D channel prediction principle, model architecture, and effectiveness analysis
+- **[Practical Guide (Chinese)](docs/practical_guide_cn.md)**: Hands-on guide with experiments, performance tuning tips, troubleshooting, and best practices for training under noise and interference scenarios
+- **[Fine-Tuning Guide](docs/fine_tuning.md)**: Detailed workflow for jammer-aware fine-tuning with parameter-efficient methods
 
 ## Citation
 
