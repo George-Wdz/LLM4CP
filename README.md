@@ -30,8 +30,74 @@ Training and testing codes are in the current folder.
 
 -   For testing, you also need to set the file_path in the main function to match your testing dataset. Then, you can run `test_tdd_full.py` to obtain the results in Figure 7 of the paper, and you can run `test_fdd_full.py` to obtain the results in Figure 8 of the paper. You can also try loading the data under `Testing Dataset/Umi` to test the models' zero-shot performance.
 
+## Jammer-aware Fine-Tuning Workflow
+
+Use the enhanced pipeline (documented in `docs/fine_tuning.md`) to fine-tune LLM4CP with synthetic interference and the jam-mask head introduced in this repo update.
+
+1. **Install dependencies**
+
+  ```bash
+  conda activate llm4cp_env  # or create your own env
+  pip install -r requirements.txt
+  ```
+
+1. **Prepare datasets and checkpoints**
+
+  ```text
+  Dataset/train_data/H_U_his_train.mat
+  Dataset/train_data/H_U_pre_train.mat
+  Dataset/test_data/H_U_his_test.mat
+  Dataset/test_data/H_U_pre_test.mat
+  Weights/U2U_LLM4CP.pth  # original checkpoint provided by authors
+  ```
+
+1. **(Optional but recommended) Cache GPT-2 weights locally** – avoids repeated downloads from Hugging Face, useful on restricted networks.
+
+  ```bash
+  mkdir -p hf_models/gpt2
+  for file in config.json merges.txt vocab.json tokenizer.json tokenizer_config.json pytorch_model.bin; do
+    wget -O hf_models/gpt2/$file https://hf-mirror.com/gpt2/resolve/main/$file
+  done
+  export GPT2_LOCAL_PATH=$(pwd)/hf_models/gpt2
+  export TRANSFORMERS_OFFLINE=1
+  ```
+
+1. **Launch fine-tuning (example: 8×RTX 4090)**
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python train.py \
+    --train-r-path ../Dataset/train_data/H_U_his_train.mat \
+    --train-t-path ../Dataset/train_data/H_U_pre_train.mat \
+    --pretrained-path ../Weights/U2U_LLM4CP.pth \
+    --save-path ../Weights/U2U_LLM4CP_jam.pth \
+    --use-jammer \
+    --lambda-mask 1.0 \
+    --jam-gate-strength 1.0 \
+    --jam-head-hidden-ratio 0.5 \
+    --epochs 100 \
+    --batch-size 2048 \
+    --multi-gpu \
+    --device-ids 0,1,2,3,4,5,6,7
+  ```
+
+  The loader synthesizes wideband, partial-band, multi-tone, pulsed, and frequency-hopping jammers with JSR sampled from **[-10, +20] dB**, and the model trains with NMSE + mask BCE losses.
+
+1. **Evaluate** using the existing scripts (update dataset paths as needed):
+
+  ```bash
+  python test_tdd_full.py
+  python test_fdd_full.py
+  ```
+
+  Extend these scripts with the same jammer configuration to produce NMSE/SE vs. JSR curves.
+
+For additional knobs (custom jammer JSON configs, LoRA/PEFT tips, etc.) see `docs/fine_tuning.md`.
+
+
 ## Citation
+
 If you find this repo helpful, please cite our paper.
+
 ```latex
 @article{liu2024llm4cp,
   title={LLM4CP: Adapting Large Language Models for Channel Prediction},

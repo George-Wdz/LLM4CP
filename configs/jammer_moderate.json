@@ -1,0 +1,11 @@
+{
+  "jam_prob": 1.0,
+  "min_types": 1,
+  "max_types": 3,
+  "jsr_db_range": [-5.0, 20.0],
+  "pb_bandwidth_frac_range": [0.15, 0.4],
+  "tone_count_range": [3, 8],
+  "pulse_duty_cycle_range": [0.06, 0.2],
+  "fh_hop_len_range": [1, 4],
+  "fh_bandwidth_frac_range": [0.1, 0.25]
+}

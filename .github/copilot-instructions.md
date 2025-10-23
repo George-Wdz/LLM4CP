@@ -1,0 +1,27 @@
+# Copilot Instructions
+
+- **Scope**: LLM4CP fine-tunes GPT-2 for OFDM channel prediction; neural code sits in `models/`, data plumbing in `data.py`, and experiment entrypoints in `train.py` plus `test_*`. 
+- **Model Path**: `models/GPT4CP.py::Model` splits complex histories into delay/frequency CNN stacks, feeds a trimmed GPT-2 block, and projects back to `[batch, pred_len, 2*K]` real-imag tokens.
+- **Frozen GPT-2**: Only positional/token embeddings and LayerNorms update by default; enable MLP tuning via the `mlp` flag when instantiating `Model`.
+- **Jam Head**: `--use-jammer` activates the mask MLP (`jam_head`) and gating strength (`jam_gate_strength`); schedule ramps with `--jam-gate-warmup`, `--lambda-mask-*` CLI knobs.
+- **Input Canon**: `LoadBatch_ofdm` reshapes `(B,T,K*ant)` complex arrays into `(B*32,T,2*K*ant/32)` real tensors; every model and metric assumes this layout.
+- **Dataset Keys**: Training `.mat` files must expose `H_U_his_train`, `H_U_pre_train`, and `H_D_pre_train`; `Dataset_Pro` reshapes them with `einops.rearrange` and injects noise via `data.noise` before normalization.
+- **Sequence Defaults**: `prev_len=16`, `pred_len=4`, `K=48` are hard-wired across loaders, metrics, and tests—change all occurrences if you alter horizons.
+- **Normalization**: Each sample is divided by its RMS after jammer/noise augmentation; skip or duplicate this step and NMSE/SE explode.
+- **Masks**: When jammers run, `Dataset_Pro` returns `(pred, prev, mask)` where `mask` already matches `return_mask=True` expectations in `Model.forward`.
+- **Metrics Pair**: `metrics.NMSELoss` works on real split tensors; `SE_Loss` requires reconverting with `Transform_TDD_FDD`. Keep prediction tensors contiguous to avoid hidden `.reshape` bugs.
+- **Training CLI**: Run `python train.py --train-r-path Dataset/train_data/H_U_his_train.mat --train-t-path Dataset/train_data/H_U_pre_train.mat --device cuda:0 --save-path Weights/U2U_LLM4CP_jam.pth [extra flags]`.
+- **Best Checkpoint**: `train_loop` saves the lowest validation-loss model to `--save-path`; delete stale checkpoints before fresh runs or the loader will reuse them.
+- **LR Groups**: With jammers enabled, jam-head params get `lr * --jam-head-lr-mult`; all other params share the base Adam config (betas 0.9/0.999, weight decay 1e-4).
+- **Multi-GPU**: `--multi-gpu` wraps the model in `nn.DataParallel`; pass `--device-ids 0,1,2` and ensure the primary GPU matches `torch.cuda.set_device`.
+- **Clean Eval**: `--eval-clean` spins up a validation loader without jammers so you can log both jammed and clean NMSE per epoch (written when `--log-file` is provided).
+- **Testing Flow**: `test_tdd_full.py` and `test_fdd_full.py` assume datasets live one level up (`../Dataset/...`) and iterate over velocity bins, writing timestamped CSVs such as `2025_10_13_13_57_05_data_nmse_tdd_full.csv`.
+- **Baselines**: Classical PAD/PronyVec baselines expect complex tensors shaped `[subcarrier, time, Nr*Nt]`; convert with `LoadBatch_ofdm_1/2` exactly as in the scripts when adding new baselines.
+- **Weights Layout**: Author checkpoints live under `Weights/<shot>_<scenario>/`; keep folder names stable because tests map `model_test_enable` directly onto these filenames.
+- **Transformer Cache**: Set `GPT2_LOCAL_PATH` to `hf_models/gpt2` (see README) to work offline; `HF_ENDPOINT` is pinned to `https://hf-mirror.com` in `GPT4CP.py`.
+- **Config Artifacts**: Jammer presets live in `DEFAULT_JAMMER_CFG`; override with `--jammer-cfg configs/jammer_dense.json` etc., and keep `num_subcarriers` divisible into the feature dimension or `apply_jammers` will raise.
+- **Docs Link**: Extended fine-tuning recipes, including PEFT hints and jammer JSON schema, are in `docs/fine_tuning.md`—reference it before inventing new flags.
+- **QuaDRiGa Source**: Synthetic data generation demos are under `dataset_generation/QuanDRiGa-main`; they're MATLAB scripts (not Python) and out-of-scope for automated edits.
+- **Device Defaults**: Hard-coded `torch.device('cuda:1')` values in tests need manual touch-up for other machines; prefer plumbing a CLI/device string rather than editing multiple call sites.
+- **Failure Modes**: Loading checkpoints trained with different antenna tilings (`UQh/UQv/BQh/BQv`) changes feature counts and crashes reshape ops—line up config and weights before inference.
+- **Logging Pattern**: Training prints per-epoch NMSE plus mask/gate stats; when `--log-file` is set it appends CSV-style lines (one per epoch). Respect this format if adding metrics so downstream parsers keep working.

@@ -56,7 +56,8 @@ class Model(nn.Module):
                  pred_len=4, prev_len=16, use_gpu=1, gpu_id=0, mlp=0, res_layers=4,
                  K=48, UQh=4, UQv=1, BQh=2, BQv=1,
                  patch_size=4, stride=1, res_dim=64,
-                 embed='timeF', freq='h', dropout=0.1):
+                 embed='timeF', freq='h', dropout=0.1,
+                 use_jam_head=False, jam_gate_strength=1.0, jam_head_hidden_ratio=0.5):
         super(Model, self).__init__()
         self.device = torch.device('cuda:{}'.format(gpu_id))
         self.mlp = mlp
@@ -67,6 +68,8 @@ class Model(nn.Module):
         self.stride = stride
         self.d_ff = d_ff
         self.d_model = d_model
+        self.use_jam_head = use_jam_head
+        self.jam_gate_strength = jam_gate_strength
 
         self.K = K
         self.UQh = UQh
@@ -81,20 +84,38 @@ class Model(nn.Module):
 
         self.enc_embedding1 = DataEmbedding(2 * self.enc_in, self.d_model, embed, freq, dropout)
 
+        jam_input_dim = 2 * self.enc_in
+        hidden_ratio = max(0.0, min(jam_head_hidden_ratio, 1.0))
+        hidden_dim = max(1, int(jam_input_dim * hidden_ratio)) if hidden_ratio > 0 else jam_input_dim
+        if self.use_jam_head:
+            self.jam_head = nn.Sequential(
+                nn.Linear(jam_input_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, jam_input_dim)
+            )
+        else:
+            self.jam_head = None
+
+        gpt2_local_path = os.environ.get('GPT2_LOCAL_PATH')
+        def load_gpt2(identifier):
+            if gpt2_local_path and os.path.isdir(gpt2_local_path):
+                return GPT2Model.from_pretrained(gpt2_local_path, output_attentions=True, output_hidden_states=True)
+            return GPT2Model.from_pretrained(identifier, output_attentions=True, output_hidden_states=True)
+
         if gpt_type == 'gpt2-medium':
-            self.gpt2 = GPT2Model.from_pretrained('gpt2-medium', output_attentions=True, output_hidden_states=True)
+            self.gpt2 = load_gpt2('gpt2-medium')
             self.gpt2.h = self.gpt2.h[:gpt_layers]
             self.gpt_dim = 1024
         elif gpt_type == 'gpt2-large':
-            self.gpt2 = GPT2Model.from_pretrained('gpt2-large', output_attentions=True, output_hidden_states=True)
+            self.gpt2 = load_gpt2('gpt2-large')
             self.gpt2.h = self.gpt2.h[:gpt_layers]
             self.gpt_dim = 1280
         elif gpt_type == 'gpt2-xl':
-            self.gpt2 = GPT2Model.from_pretrained('gpt2-xl', output_attentions=True, output_hidden_states=True)
+            self.gpt2 = load_gpt2('gpt2-xl')
             self.gpt2.h = self.gpt2.h[:gpt_layers]
             self.gpt_dim = 1600
         else:
-            self.gpt2 = GPT2Model.from_pretrained('gpt2', output_attentions=True, output_hidden_states=True)
+            self.gpt2 = load_gpt2('gpt2')
             self.gpt2.h = self.gpt2.h[:gpt_layers]
             self.gpt_dim = 768
 
@@ -126,11 +147,16 @@ class Model(nn.Module):
         self.RB_e.append(nn.Conv2d(res_dim, 2, 3, 1, 1))
         self.RB_f.append(nn.Conv2d(res_dim, 2, 3, 1, 1))
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, return_mask=False):
         mean = torch.mean(x_enc)
         std = torch.std(x_enc)
         x_enc = (x_enc - mean) / std
         B, L, enc_in = x_enc.shape  # [B, L, D]
+        jam_mask = None
+        if self.use_jam_head:
+            jam_logits = self.jam_head(x_enc)
+            jam_mask = torch.sigmoid(jam_logits)
+            x_enc = x_enc * (1.0 - self.jam_gate_strength * jam_mask)
         # process in delay domain
         x_enc_r = rearrange(x_enc, 'b l (k o) -> b l k o', o=2)
         x_enc_complex = torch.complex(x_enc_r[:, :, :, 0], x_enc_r[:, :, :, 1])
@@ -164,7 +190,10 @@ class Model(nn.Module):
 
         dec_out = dec_out * std + mean
 
-        return dec_out[:, -self.pred_len:, :]  # [B, L, D]
+        dec_out = dec_out[:, -self.pred_len:, :]
+        if return_mask:
+            return dec_out, jam_mask
+        return dec_out  # [B, L, D]
 
 if __name__ == '__main__':
     import torch
