@@ -25,7 +25,7 @@ if __name__ == "__main__":
     pred_path = "../Dataset/test_data/H_U_pre_test.mat"      # path of dataset [H_U_pre_test]
     pred_path_fdd = "../Dataset/test_data/H_D_pre_test.mat"  # path of dataset [H_D_pre_test]
     model_path = {
-        'gpt': '../Weights/full_shot_fdd/U2D_LLM4CP.pth',
+        'gpt': '../Weights/full_shot_fdd/U2D_LLM4CP_fdd_light2_sched.pth.epoch100.pth',
         'transformer': '../Weights/full_shot_fdd/U2D_trans.pth',
         'cnn': '../Weights/full_shot_fdd/U2D_cnn.pth',
         'gru': '../Weights/full_shot_fdd/U2D_gru.pth',
@@ -36,7 +36,7 @@ if __name__ == "__main__":
     prev_len = 16
     label_len = 12
     pred_len = 4
-    K, Nt, Nr, SR = (48, 16, 1, 1)
+    K, Nt, Nr, SR = (64, 16, 1, 1)
     print("Total model nums:", len(model_test_enable))
     # load model and test
     criterion = NMSELoss()

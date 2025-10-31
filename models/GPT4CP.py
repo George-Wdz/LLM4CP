@@ -11,6 +11,32 @@ from einops import rearrange
 from Embed import DataEmbedding
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+"""
+Robust offline loading for GPT-2:
+- Prefer environment variable GPT2_LOCAL_PATH if it exists and contains full weights.
+- Else, fallback to repo-local path ../../hf_models/gpt2 if present.
+- If a local path exists but pytorch_model.bin is missing, optionally allow random init when
+  env GPT2_ALLOW_RANDOM_INIT=1; otherwise raise with a clear message instead of trying network.
+- When a valid local path is detected, set TRANSFORMERS_OFFLINE/HF_HUB_OFFLINE to avoid network.
+"""
+
+def _resolve_local_gpt2_dir():
+    env_dir = os.environ.get('GPT2_LOCAL_PATH')
+    if env_dir and os.path.isdir(env_dir):
+        return os.path.abspath(env_dir)
+    # Fallback to repo default: ../../hf_models/gpt2 relative to this file
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    default_dir = os.path.join(repo_root, 'hf_models', 'gpt2')
+    if os.path.isdir(default_dir):
+        return default_dir
+    return None
+
+def _has_full_weights(local_dir: str) -> bool:
+    if not local_dir:
+        return False
+    cfg_ok = os.path.exists(os.path.join(local_dir, 'config.json'))
+    w_ok = os.path.exists(os.path.join(local_dir, 'pytorch_model.bin'))
+    return cfg_ok and w_ok
 
 
 class ChannelAttention(nn.Module):
@@ -54,7 +80,7 @@ class Model(nn.Module):
 
     def __init__(self, gpt_type='gpt2', d_ff=768, d_model=768, gpt_layers=6,
                  pred_len=4, prev_len=16, use_gpu=1, gpu_id=0, mlp=0, res_layers=4,
-                 K=48, UQh=4, UQv=1, BQh=2, BQv=1,
+                 K=64, UQh=4, UQv=1, BQh=2, BQv=1,
                  patch_size=4, stride=1, res_dim=64,
                  embed='timeF', freq='h', dropout=0.1,
                  use_jam_head=False, jam_gate_strength=1.0, jam_head_hidden_ratio=0.5):
@@ -96,11 +122,36 @@ class Model(nn.Module):
         else:
             self.jam_head = None
 
-        gpt2_local_path = os.environ.get('GPT2_LOCAL_PATH')
+        gpt2_local_path = _resolve_local_gpt2_dir()
+
         def load_gpt2(identifier):
+            # Prefer local directory when available
             if gpt2_local_path and os.path.isdir(gpt2_local_path):
-                return GPT2Model.from_pretrained(gpt2_local_path, output_attentions=True, output_hidden_states=True)
-            return GPT2Model.from_pretrained(identifier, output_attentions=True, output_hidden_states=True)
+                # Force offline when local assets are present
+                os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
+                os.environ.setdefault('HF_HUB_OFFLINE', '1')
+                if _has_full_weights(gpt2_local_path):
+                    return GPT2Model.from_pretrained(
+                        gpt2_local_path,
+                        output_attentions=True,
+                        output_hidden_states=True,
+                        local_files_only=True,
+                    )
+                # Allow random init if explicitly permitted
+                if os.environ.get('GPT2_ALLOW_RANDOM_INIT', '0') == '1':
+                    from transformers import GPT2Config
+                    cfg = GPT2Config.from_pretrained(gpt2_local_path, local_files_only=True)
+                    return GPT2Model(cfg)
+                raise FileNotFoundError(
+                    f"GPT-2 local path detected at '{gpt2_local_path}' but 'pytorch_model.bin' is missing. "
+                    f"Place the weights file there or set GPT2_ALLOW_RANDOM_INIT=1 to initialize randomly.")
+
+            # Fall back to remote identifier (may use mirrors depending on environment)
+            return GPT2Model.from_pretrained(
+                identifier,
+                output_attentions=True,
+                output_hidden_states=True,
+            )
 
         if gpt_type == 'gpt2-medium':
             self.gpt2 = load_gpt2('gpt2-medium')

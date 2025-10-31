@@ -18,11 +18,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune LLM4CP with jammer-aware masking")
     parser.add_argument('--train-r-path', type=str, default='./H_U_his_train.mat',
                         help='Path to historical channel .mat file')
-    parser.add_argument('--train-t-path', type=str, default='./H_U_pre_train.mat',
+    parser.add_argument('--train-t-path', type=str, default='./H_D_pre_train.mat',
                         help='Path to future channel .mat file')
-    parser.add_argument('--save-path', type=str, default='Weights/U2U_LLM4CP.pth',
+    parser.add_argument('--save-path', type=str, default='Weights/U2D_LLM4CP.pth',
                         help='Checkpoint save path')
-    parser.add_argument('--pretrained-path', type=str, default='Weights/U2U_LLM4CP.pth',
+    parser.add_argument('--save-every', type=int, default=0,
+                        help='If >0, save a checkpoint every N epochs to <save-path>.epoch{E}.pth')
+    parser.add_argument('--save-last', action='store_true',
+                        help='If set, save the final model at the end of training to <save-path>.last.pth')
+    parser.add_argument('--pretrained-path', type=str, default='Weights/U2D_LLM4CP.pth',
                         help='Optional pretrained checkpoint path for initialization')
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch-size', type=int, default=1024)
@@ -63,6 +67,8 @@ def parse_args():
                         help='If set, append per-epoch summaries to this file')
     parser.add_argument('--eval-clean', action='store_true',
                         help='Run an additional validation pass without jammers (clean)')
+    parser.add_argument('--is-u2d', action='store_true',
+                        help='Use U->D (FDD) target: read H_D_pre_* keys instead of H_U_pre_* in Dataset_Pro')
     return parser.parse_args()
 
 
@@ -89,7 +95,25 @@ def load_pretrained(model: Model, path: Optional[str], device: torch.device):
         state_dict = checkpoint
     else:
         raise ValueError(f"Unsupported checkpoint type: {type(checkpoint)}")
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+    # Filter out keys with shape mismatch (e.g., jam_head when hidden ratio changed)
+    model_sd = model.state_dict()
+    filtered = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k in model_sd and isinstance(v, torch.Tensor) and isinstance(model_sd[k], torch.Tensor):
+            if v.shape == model_sd[k].shape:
+                filtered[k] = v
+            else:
+                skipped.append((k, tuple(v.shape), tuple(model_sd[k].shape)))
+        else:
+            # keep non-tensor buffers or allow missing keys
+            filtered[k] = v
+    if skipped:
+        print("[Init] Skipped mismatched parameters:")
+        for name, s_old, s_new in skipped:
+            print(f"        {name}: ckpt {s_old} != model {s_new}")
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
     if missing:
         print(f"[Init] Missing parameters: {missing}")
     if unexpected:
@@ -226,6 +250,21 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         if v_loss < best_loss:
             best_loss = v_loss
             save_best_checkpoint(model, args.save_path)
+            # also optionally write a numbered best file for easier bookkeeping
+            try:
+                best_epoch_path = args.save_path + f".best_epoch{epoch+1}.pth"
+                torch.save(_core_model(model).state_dict(), best_epoch_path)
+            except Exception:
+                # non-fatal: ignore failures to write the auxiliary file
+                pass
+        # periodic save if requested
+        if getattr(args, 'save_every', 0) and (epoch + 1) % int(args.save_every) == 0:
+            try:
+                periodic_path = args.save_path + f".epoch{epoch+1}.pth"
+                torch.save(model, periodic_path)
+                print(f"[Save] Periodic checkpoint saved to {periodic_path}")
+            except Exception as e:
+                print(f"[Save] Failed to write periodic checkpoint: {e}")
         if scheduler is not None:
             scheduler.step()
             next_lr = optimizer.param_groups[0]['lr']
@@ -249,6 +288,16 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                 log_fp.flush()
             except Exception as e:
                 print(f"[Log] Write failed: {e}")
+
+    # end of epoch loop
+    # after training completes, optionally save the final checkpoint
+    if getattr(args, 'save_last', False):
+        try:
+            final_path = args.save_path + ".last.pth"
+            torch.save(model, final_path)
+            print(f"[Save] Final checkpoint saved to {final_path}")
+        except Exception as e:
+            print(f"[Save] Failed to write final checkpoint: {e}")
 
     if log_fp is not None:
         try:
@@ -276,18 +325,18 @@ def main():
         with open(args.jammer_cfg, 'r') as f:
             jammer_cfg = json.load(f)
 
-    train_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=1, is_U2D=0,
+    train_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=1, is_U2D=1 if args.is_u2d else 0,
                             is_few=1 if args.few_shot else 0,
                             use_jammer=args.use_jammer, jammer_cfg=jammer_cfg,
                             return_mask=args.use_jammer)
-    validate_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=0,
+    validate_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=1 if args.is_u2d else 0,
                                is_few=0,
                                use_jammer=args.use_jammer, jammer_cfg=jammer_cfg,
                                return_mask=args.use_jammer)
     validate_set_clean = None
     validation_loader_clean = None
     if args.eval_clean and args.use_jammer:
-        validate_set_clean = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=0,
+        validate_set_clean = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=1 if args.is_u2d else 0,
                                          is_few=0,
                                          use_jammer=False, jammer_cfg=None,
                                          return_mask=False)

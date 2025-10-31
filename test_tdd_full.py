@@ -36,7 +36,7 @@ if __name__ == "__main__":
     prev_len = 16
     label_len = 12
     pred_len = 4
-    K, Nt, Nr, SR = (48, 16, 1, 1)
+    K, Nt, Nr, SR = (64, 16, 1, 1)
     print("Total model nums:", len(model_test_enable))
     # load model and test
     criterion = NMSELoss()

@@ -8,16 +8,16 @@ from numpy import random
 
 DEFAULT_JAMMER_CFG = {
     'types': ['wb', 'pb', 'tone', 'pulse', 'fh'],
-    'min_types': 1,
-    'max_types': 2,
-    'jam_prob': 1.0,
-    'jsr_db_range': (-10.0, 20.0),
-    'pb_bandwidth_frac_range': (0.1, 0.4),
-    'tone_count_range': (2, 6),
-    'pulse_duty_cycle_range': (0.05, 0.2),
-    'fh_hop_len_range': (1, 4),
-    'fh_bandwidth_frac_range': (0.08, 0.2),
-    'num_subcarriers': 48,
+    'min_types': 0,
+    'max_types': 4,
+    'jam_prob': 1,
+    'jsr_db_range': (-5.0, 25.0), #JSR 范围
+    'pb_bandwidth_frac_range': (0.1, 0.4), # 部分带宽干扰覆盖子载波范围
+    'tone_count_range': (4, 10), #多音干扰一次激活的离散频点数量
+    'pulse_duty_cycle_range': (0.05, 0.2), #脉冲干扰在时间轴上占比
+    'fh_hop_len_range': (1, 4), #频率跳变干扰的停留时长范围
+    'fh_bandwidth_frac_range': (0.08, 0.2), #频率跳变干扰的带宽占比范围
+    'num_subcarriers': 64,
     'seed': None
 }
 
@@ -186,18 +186,34 @@ def LoadBatch_mask(mask, num=32):
 
 class Dataset_Pro(data.Dataset):
     def __init__(self, file_path_r, file_path_t, is_train=1, ir=1, SNR=15, is_U2D=0, is_few=0,
-                 train_per=0.9, valid_per=0.1, use_jammer=False, jammer_cfg=None, return_mask=False):
+                 train_per=0.9, valid_per=0.1, use_jammer=False, jammer_cfg=None,
+                 return_mask=False, add_awgn=True):
         super(Dataset_Pro, self).__init__()
         self.SNR = SNR
         self.ir = ir
         self.use_jammer = use_jammer
         self.return_mask = return_mask and use_jammer
         self.jammer_cfg = _merge_jammer_cfg(jammer_cfg) if use_jammer else None
-        H_his = hdf5storage.loadmat(file_path_r)['H_U_his_train']  # v,b,l,k,a,b,c
-        if is_U2D:
-            H_pre = hdf5storage.loadmat(file_path_t)["H_D_pre_train"]  # v,b,l,k,a,b,c
+        self.add_awgn = add_awgn
+        H_his_mat = hdf5storage.loadmat(file_path_r)
+        for key in ('H_U_his_train', 'H_D_his_train'):
+            if key in H_his_mat:
+                H_his = H_his_mat[key]
+                break
         else:
-            H_pre = hdf5storage.loadmat(file_path_t)["H_U_pre_train"]  # v,b,l,k,a,b,c
+            raise KeyError(f"Historical channel keys ('H_U_his_train','H_D_his_train') not found in {file_path_r}; available keys: {list(H_his_mat.keys())}")
+
+        H_pre_mat = hdf5storage.loadmat(file_path_t)
+        if is_U2D:
+            pre_keys = ('H_D_pre_train', 'H_U_pre_train')
+        else:
+            pre_keys = ('H_U_pre_train', 'H_D_pre_train')
+        for key in pre_keys:
+            if key in H_pre_mat:
+                H_pre = H_pre_mat[key]
+                break
+        else:
+            raise KeyError(f"Future channel keys {pre_keys} not found in {file_path_t}; available keys: {list(H_pre_mat.keys())}")
         # print(H_his.shape, H_pre.shape)
 
         batch = H_pre.shape[1]
@@ -220,9 +236,10 @@ class Dataset_Pro(data.Dataset):
         np.random.shuffle(dt_all)
         H_his = dt_all[:, :prev_len, ...]
         H_pre = dt_all[:, -pred_len:, ...]
-        for i in range(B):
-            H_his[i, ...] = noise(H_his[i, ...], random.rand() * 15 + 5.0)
-            H_pre[i, ...] = noise(H_pre[i, ...], random.rand() * 15 + 5.0)
+        if self.add_awgn:
+            for i in range(B):
+                H_his[i, ...] = noise(H_his[i, ...], random.rand() * 15 + 5.0)
+                H_pre[i, ...] = noise(H_pre[i, ...], random.rand() * 15 + 5.0)
         jam_mask = np.zeros_like(H_his.real, dtype=np.float32)
         if self.use_jammer:
             H_his, jam_mask = apply_jammers(H_his, self.jammer_cfg)
