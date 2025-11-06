@@ -22,7 +22,7 @@ def parse_args():
                         help='Path to future channel .mat file')
     parser.add_argument('--save-path', type=str, default='Weights/U2D_LLM4CP.pth',
                         help='Checkpoint save path')
-    parser.add_argument('--save-every', type=int, default=0,
+    parser.add_argument('--save-every', type=int, default=20,
                         help='If >0, save a checkpoint every N epochs to <save-path>.epoch{E}.pth')
     parser.add_argument('--save-last', action='store_true',
                         help='If set, save the final model at the end of training to <save-path>.last.pth')
@@ -48,14 +48,14 @@ def parse_args():
     parser.add_argument('--use-jammer', action='store_true', help='Enable synthetic jammer augmentation and mask loss')
     parser.add_argument('--jammer-cfg', type=str, default=None,
                         help='Path to JSON config overriding jammer parameters')
-    parser.add_argument('--lambda-mask', type=float, default=2.0, help='Initial weight for jammer mask BCE loss')
+    parser.add_argument('--lambda-mask', type=float, default=0, help='Initial weight for jammer mask BCE loss')
     parser.add_argument('--lambda-mask-final', type=float, default=None,
                         help='Optional final weight for jammer mask BCE loss after scheduling')
     parser.add_argument('--lambda-mask-switch', type=int, default=0,
                         help='Epoch index to start transitioning lambda-mask (0-based)')
     parser.add_argument('--lambda-mask-ramp', type=int, default=0,
                         help='Number of epochs to linearly ramp lambda-mask from start to final after switch')
-    parser.add_argument('--jam-gate-strength', type=float, default=1.0,
+    parser.add_argument('--jam-gate-strength', type=float, default=0,
                         help='Target multiplier applied to predicted jam mask when gating inputs')
     parser.add_argument('--jam-gate-start', type=float, default=0.0,
                         help='Initial jam gate strength before warmup ramp')
