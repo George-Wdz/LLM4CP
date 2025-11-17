@@ -36,8 +36,41 @@ def _merge_jammer_cfg(user_cfg):
     return cfg
 
 
-def _ensure_rng(seed):
-    return np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+def _ensure_rng(seed=None):
+    """Return RNG consistent with global NumPy seed.
+
+    If seed is None, use the *global* np.random as RNG so that
+    external calls to np.random.seed(...) (e.g. in test_tdd_full.py)
+    can fully control jammer randomness. If a seed is provided, we
+    fall back to creating a dedicated Generator for that seed.
+    """
+    if seed is None:
+        # Wrap global np.random so existing code can call rng.uniform/
+        # rng.integers/... and still be driven by np.random.seed(...).
+        class _GlobalRNG:
+            def uniform(self, *args, **kwargs):
+                return np.random.uniform(*args, **kwargs)
+
+            def standard_normal(self, *args, **kwargs):
+                return np.random.standard_normal(*args, **kwargs)
+
+            def integers(self, *args, **kwargs):
+                # numpy.random.randint is equivalent for our integer usage
+                return np.random.randint(*args, **kwargs)
+
+            def choice(self, *args, **kwargs):
+                return np.random.choice(*args, **kwargs)
+
+            def shuffle(self, *args, **kwargs):
+                return np.random.shuffle(*args, **kwargs)
+
+            def random(self, *args, **kwargs):
+                return np.random.random(*args, **kwargs)
+
+        return _GlobalRNG()
+    # When an explicit seed is given, preserve previous behavior
+    # by constructing an independent Generator instance.
+    return np.random.default_rng(seed)
 
 
 def _compute_jam_sigma(sample, jsr_db):

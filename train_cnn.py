@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -12,20 +12,29 @@ from torch.utils.data import DataLoader
 
 from data import Dataset_Pro
 from metrics import NMSELoss
-from models.model import InformerStack
+from models.model import Autoencoder
+
+
+def parse_int_list(raw: Optional[str]) -> Optional[List[int]]:
+    if not raw:
+        return None
+    tokens = [tok.strip() for tok in raw.split(',') if tok.strip()]
+    if not tokens:
+        return None
+    return [int(tok) for tok in tokens]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train transformer-style baselines (InformerStack) on LLM4CP data")
+    parser = argparse.ArgumentParser(description="Train CNN (autoencoder) baseline on LLM4CP data")
     # data paths
     parser.add_argument('--train-r-path', type=str, required=True,
-                        help='Path to historical channel .mat file (e.g., Dataset/train/H_U_his_train.mat)')
+                        help='Path to historical channel .mat file (e.g., Dataset/train_data/H_U_his_train.mat)')
     parser.add_argument('--train-t-path', type=str, required=True,
-                        help='Path to future channel .mat file (e.g., Dataset/train/H_U_pre_train.mat)')
+                        help='Path to future channel .mat file (e.g., Dataset/train_data/H_U_pre_train.mat)')
     parser.add_argument('--save-path', type=str, required=True,
                         help='File to store the best checkpoint (saved with torch.save(model, path))')
     parser.add_argument('--pretrained-path', type=str, default=None,
-                        help='Optional Informer checkpoint to resume from (expects torch.save(model, path) format)')
+                        help='Optional CNN checkpoint to resume from (expects torch.save(model, path) format)')
     parser.add_argument('--log-file', type=str, default=None,
                         help='Optional log file; writes CSV with epoch metrics')
     parser.add_argument('--few-shot', action='store_true',
@@ -40,37 +49,28 @@ def parse_args() -> argparse.Namespace:
                         help='Disable AWGN injection inside Dataset_Pro')
 
     # optimization
-    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=512)
     parser.add_argument('--val-batch-size', type=int, default=None,
                         help='Optional validation batch size; defaults to --batch-size when unset')
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=1e-5)
     parser.add_argument('--lr-step-size', type=int, default=100,
                         help='Epoch interval for StepLR (<=0 disables scheduler)')
     parser.add_argument('--lr-gamma', type=float, default=0.1,
                         help='Multiplicative factor for StepLR when enabled')
-    parser.add_argument('--grad-clip', type=float, default=1.0,
+    parser.add_argument('--grad-clip', type=float, default=0.0,
                         help='Gradient clipping value; <=0 disables clipping')
 
     # architecture
-    parser.add_argument('--label-len', type=int, default=12,
-                        help='Number of history steps copied into the decoder input')
-    parser.add_argument('--d-model', type=int, default=192)
-    parser.add_argument('--n-heads', type=int, default=8)
-    parser.add_argument('--e-layers', type=int, default=3)
-    parser.add_argument('--d-layers', type=int, default=2)
-    parser.add_argument('--d-ff', type=int, default=192)
-    parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--attn', type=str, default='prob', choices=['prob', 'full'])
-    parser.add_argument('--embed', type=str, default='fixed', choices=['fixed', 'timeF'])
-    parser.add_argument('--activation', type=str, default='gelu', choices=['gelu', 'relu'])
-    parser.add_argument('--no-distil', action='store_true',
-                        help='Disable Informer distillation (keeps all encoder layers)')
+    parser.add_argument('--filters', type=str, default=None,
+                        help='Comma-separated encoder channel sizes (default matches paper setting)')
+    parser.add_argument('--kernel-sizes', type=str, default=None,
+                        help='Comma-separated convolution kernel sizes per stage (default all 3)')
 
     # runtime
     parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--num-workers', type=int, default=16)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--data-parallel', action='store_true',
                         help='Enable DataParallel over all visible CUDA devices')
@@ -87,13 +87,22 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _load_checkpoint(path: Optional[str], device: torch.device) -> Optional[nn.Module]:
+def _load_checkpoint(path: Optional[str], device: torch.device) -> Optional[dict]:
     if not path:
         return None
     if not os.path.exists(path):
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     print(f"[Resume] Loading checkpoint from {path}")
-    return torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, nn.DataParallel):
+        return checkpoint.module.state_dict()
+    if isinstance(checkpoint, nn.Module):
+        return checkpoint.state_dict()
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint and isinstance(checkpoint['state_dict'], dict):
+            return checkpoint['state_dict']
+        return checkpoint
+    raise ValueError(f"Unsupported checkpoint type at {path}: {type(checkpoint)}")
 
 
 def _save_model(model: nn.Module, path: str, device: torch.device) -> None:
@@ -109,29 +118,18 @@ def _save_model(model: nn.Module, path: str, device: torch.device) -> None:
     print(f"[Save] Best checkpoint updated -> {path}")
 
 
-def build_model(feature_dim: int, prev_len: int, pred_len: int, args: argparse.Namespace,
-                device: torch.device) -> nn.Module:
-    model = InformerStack(
-        enc_in=feature_dim,
-        dec_in=feature_dim,
-        c_out=feature_dim,
-        seq_len=prev_len,
-        label_len=min(args.label_len, prev_len),
-        out_len=pred_len,
-        factor=5,
-        d_model=args.d_model,
-        n_heads=args.n_heads,
-        e_layers=args.e_layers,
-        d_layers=args.d_layers,
-        d_ff=args.d_ff,
-        dropout=args.dropout,
-        attn=args.attn,
-        embed=args.embed,
-        activation=args.activation,
-        distil=not args.no_distil,
-        device=device,
-    )
-    return model.to(device)
+def build_model(args: argparse.Namespace) -> Autoencoder:
+    filters = parse_int_list(args.filters)
+    kernel_sizes = parse_int_list(args.kernel_sizes)
+    if kernel_sizes is not None and filters is not None and len(kernel_sizes) != len(filters):
+        raise ValueError("--filters and --kernel-sizes must have the same length when both are provided")
+    if filters is None:
+        model = Autoencoder()
+    elif kernel_sizes is None:
+        model = Autoencoder(n_filters=filters)
+    else:
+        model = Autoencoder(n_filters=filters, filter_sizes=kernel_sizes)
+    return model
 
 
 def prepare_dataloaders(args: argparse.Namespace):
@@ -187,8 +185,7 @@ def prepare_dataloaders(args: argparse.Namespace):
 
 
 def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, *, device: torch.device,
-              label_len: int, pred_len: int, optimizer: Optional[optim.Optimizer] = None,
-              grad_clip: float = 0.0) -> float:
+              optimizer: Optional[optim.Optimizer] = None, grad_clip: float = 0.0) -> float:
     is_train = optimizer is not None
     model.train(is_train)
     epoch_loss = 0.0
@@ -197,10 +194,7 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, *, dev
     for gt_pred, hist in loader:
         hist = hist.to(device)
         gt_pred = gt_pred.to(device)
-        decoder_seed = hist[:, -label_len:, :]
-        zero_pad = torch.zeros(gt_pred.size(0), pred_len, hist.size(2), device=device)
-        dec_input = torch.cat([decoder_seed, zero_pad], dim=1)
-        out = model(hist, dec_input)
+        out = model(hist)
         loss = criterion(out, gt_pred)
 
         if is_train:
@@ -217,7 +211,7 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, *, dev
     return epoch_loss / max(sample_count, 1)
 
 
-def main():
+def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -225,26 +219,25 @@ def main():
     train_set, loader_train, loader_val = prepare_dataloaders(args)
     prev_len = train_set.prev.shape[1]
     pred_len = train_set.pred.shape[1]
-    feature_dim = train_set.prev.shape[2]
-    label_len = min(args.label_len, prev_len)
+    if prev_len != 16 or pred_len != 4:
+        raise ValueError(f"Autoencoder baseline expects prev_len=16 and pred_len=4, but got prev_len={prev_len}, pred_len={pred_len}")
 
-    model = build_model(feature_dim, prev_len, pred_len, args, device)
+    model = build_model(args).to(device)
     if args.data_parallel and torch.cuda.device_count() > 1:
         print(f"[Info] Enabling DataParallel across {torch.cuda.device_count()} devices")
         model = nn.DataParallel(model)
         primary_device = device
     else:
         primary_device = device
-    if args.pretrained_path:
-        checkpoint = _load_checkpoint(args.pretrained_path, device)
-        if checkpoint is not None:
-            if isinstance(checkpoint, nn.Module):
-                target = model.module if isinstance(model, nn.DataParallel) else model
-                target.load_state_dict(checkpoint.state_dict(), strict=False)
-            elif isinstance(checkpoint, dict):
-                model.load_state_dict(checkpoint, strict=False)
-            else:
-                raise ValueError(f"Unsupported checkpoint type at {args.pretrained_path}: {type(checkpoint)}")
+
+    state_dict = _load_checkpoint(args.pretrained_path, device)
+    if state_dict is not None:
+        target = model.module if isinstance(model, nn.DataParallel) else model
+        missing, unexpected = target.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"[Resume] Missing parameters: {missing}")
+        if unexpected:
+            print(f"[Resume] Unexpected parameters: {unexpected}")
 
     criterion = NMSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -267,8 +260,6 @@ def main():
                 loader_train,
                 criterion,
                 device=primary_device,
-                label_len=label_len,
-                pred_len=pred_len,
                 optimizer=optimizer,
                 grad_clip=args.grad_clip,
             )
@@ -279,8 +270,6 @@ def main():
                     loader_val,
                     criterion,
                     device=primary_device,
-                    label_len=label_len,
-                    pred_len=pred_len,
                     optimizer=None,
                     grad_clip=0.0,
                 )
@@ -299,7 +288,7 @@ def main():
 
             if val_loss < best_val:
                 best_val = val_loss
-                _save_model(model, args.save_path, device)
+                _save_model(model, args.save_path, primary_device)
     finally:
         if log_fp is not None:
             log_fp.close()

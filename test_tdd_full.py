@@ -9,6 +9,7 @@
 import time
 import argparse
 import json
+import random
 import torch
 import numpy as np
 from data import LoadBatch_ofdm_1, LoadBatch_ofdm_2, noise, Transform_TDD_FDD, apply_jammers
@@ -28,13 +29,13 @@ def parse_args():
     ap.add_argument('--is-u2d', action='store_true', help='Use U2D FDD target for evaluation')
     # models / device
     ap.add_argument('--device', default='cuda:0')
-    ap.add_argument('--models', nargs='*', default=['gpt', 'transformer', 'cnn', 'gru', 'lstm', 'rnn', 'np', 'pad'])
-    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2U3.5_LLM4CP_tdd_light_sched.pth')
-    ap.add_argument('--weights-transformer', default='../Weights/full_shot_tdd/U2U_trans.pth')
-    ap.add_argument('--weights-cnn', default='../Weights/full_shot_tdd/U2U_cnn.pth')
-    ap.add_argument('--weights-gru', default='../Weights/full_shot_tdd/U2U_gru.pth')
-    ap.add_argument('--weights-lstm', default='../Weights/full_shot_tdd/U2U_lstm.pth')
-    ap.add_argument('--weights-rnn', default='../Weights/full_shot_tdd/U2U_rnn.pth')
+    ap.add_argument('--models', nargs='*', default=['gpt', 'transformer', 'cnn', 'gru', 'lstm', 'rnn', 'pad', 'np'])
+    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2D3.5_LLM4CP_tdd_ms_sched.pth.last.pth')
+    ap.add_argument('--weights-transformer', default='../Weights/full_shot_tdd/U2U_trans_retrain.pth')
+    ap.add_argument('--weights-cnn', default='../Weights/full_shot_tdd/U2U_cnn_retrain.pth')
+    ap.add_argument('--weights-gru', default='../Weights/full_shot_tdd/U2U_gru_retrain.pth')
+    ap.add_argument('--weights-lstm', default='../Weights/full_shot_tdd/U2U_lstm_retrain.pth')
+    ap.add_argument('--weights-rnn', default='../Weights/full_shot_tdd/U2U_rnn_retrain.pth')
     # evaluation settings
     ap.add_argument('--batch-size', type=int, default=64)
     ap.add_argument('--snr-awgn', type=float, default=18.0, help='AWGN SNR used for test-time noise() on both input/target')
@@ -48,11 +49,26 @@ def parse_args():
     ap.add_argument('--use-jammer', action='store_true')
     ap.add_argument('--jammer-cfg', default=None, help='Path to jammer JSON config')
     ap.add_argument('--jam-gate', type=float, default=None, help='If set and model is GPT4CP with jam head, override jam_gate_strength during inference')
+    ap.add_argument('--seed', type=int, default=2025, help='Random seed for AWGN and jammer')
     return ap.parse_args()
+
+
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducible AWGN and jammer realizations."""
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch as _torch
+        _torch.manual_seed(seed)
+        if _torch.cuda.is_available():
+            _torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
     args = parse_args()
+    set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     is_U2D = 1 if args.is_u2d else 0
     prev_path = args.prev_path

@@ -294,6 +294,8 @@ class RNN(nn.Module):
     def train_pro(self, x, pred_len, device):
 
         BATCH_SIZE, seq_len, _ = x.shape
+        if device is None:
+            device = x.device
         prev_hidden = torch.zeros(self.num_layers, BATCH_SIZE, self.hidden_size).to(device)
         outputs = []
         for idx in range(seq_len + pred_len - 1):
@@ -361,6 +363,8 @@ class GRU(nn.Module):
     def train_pro(self, x, pred_len, device):
 
         BATCH_SIZE, seq_len, _ = x.shape
+        if device is None:
+            device = x.device
         prev_hidden = torch.zeros(self.num_layers, BATCH_SIZE, self.hidden_size).to(device)
         outputs = []
         for idx in range(seq_len + pred_len - 1):
@@ -428,6 +432,8 @@ class LSTM(nn.Module):
     def train_pro(self, x, pred_len, device):
 
         BATCH_SIZE, seq_len, _ = x.shape
+        if device is None:
+            device = x.device
         prev_hidden = torch.zeros(self.num_layers, BATCH_SIZE, self.hidden_size).to(device)
         prev_cell = torch.zeros(self.num_layers, BATCH_SIZE, self.hidden_size).to(device)
         outputs = []

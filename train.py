@@ -26,7 +26,7 @@ def parse_args():
                         help='If >0, save a checkpoint every N epochs to <save-path>.epoch{E}.pth')
     parser.add_argument('--save-last', action='store_true',
                         help='If set, save the final model at the end of training to <save-path>.last.pth')
-    parser.add_argument('--pretrained-path', type=str, default='Weights/U2D_LLM4CP.pth',
+    parser.add_argument('--pretrained-path', type=str, default=None,
                         help='Optional pretrained checkpoint path for initialization')
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch-size', type=int, default=1024)
