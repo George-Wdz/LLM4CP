@@ -133,3 +133,4 @@ epoch=132, lr=1.000000e-03, train_total=0.1846693, train_mask=0.6931472, val_tot
 epoch=133, lr=1.000000e-03, train_total=0.1850288, train_mask=0.6931472, val_total=0.2126542, val_nmse=0.2126542, val_mask=0.6931472, val_clean=nan, gate=0.000000, lambda_mask=0.000000
 epoch=134, lr=1.000000e-03, train_total=0.1912744, train_mask=0.6931472, val_total=0.2132972, val_nmse=0.2132972, val_mask=0.6931472, val_clean=nan, gate=0.000000, lambda_mask=0.000000
 epoch=135, lr=1.000000e-03, train_total=0.1869759, train_mask=0.6931472, val_total=0.2144146, val_nmse=0.2144146, val_mask=0.6931472, val_clean=nan, gate=0.000000, lambda_mask=0.000000
+epoch=136, lr=1.000000e-03, train_total=0.1851824, train_mask=0.6931472, val_total=0.2115095, val_nmse=0.2115095, val_mask=0.6931472, val_clean=nan, gate=0.000000, lambda_mask=0.000000
