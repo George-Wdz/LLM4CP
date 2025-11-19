@@ -122,6 +122,14 @@ class Model(nn.Module):
         else:
             self.jam_head = None
 
+        # New: optional learnable global gate and conditional adaptive gate head
+        # self.learnable_gate: single global scalar gate learned as parameter (sigmoid constrained)
+        # self.adaptive_gate: per-sample/per-timestep small MLP mapping jam_logits -> scalar gamma(b,t)
+        self.learnable_gate = False
+        self.adaptive_gate = False
+        self.gate_mlp = None
+        self.jam_gate_param = None
+
         gpt2_local_path = _resolve_local_gpt2_dir()
 
         def load_gpt2(identifier):
@@ -197,6 +205,7 @@ class Model(nn.Module):
             self.RB_f.append(Res_block(res_dim))
         self.RB_e.append(nn.Conv2d(res_dim, 2, 3, 1, 1))
         self.RB_f.append(nn.Conv2d(res_dim, 2, 3, 1, 1))
+        # Note: gate related parameters will be configured externally after construction
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, return_mask=False):
         mean = torch.mean(x_enc)
@@ -205,9 +214,24 @@ class Model(nn.Module):
         B, L, enc_in = x_enc.shape  # [B, L, D]
         jam_mask = None
         if self.use_jam_head:
+            # jam_logits: [B, L, D]
             jam_logits = self.jam_head(x_enc)
             jam_mask = torch.sigmoid(jam_logits)
-            x_enc = x_enc * (1.0 - self.jam_gate_strength * jam_mask)
+
+            # compute gating coefficient gamma
+            if getattr(self, 'adaptive_gate', False) and (self.gate_mlp is not None):
+                # gate_mlp expects input per (b,l,features) and returns scalar per time-step
+                # apply gate MLP to jam_logits -> [B,L,1]
+                gamma = self.gate_mlp(jam_logits)  # expected shape [B,L,1]
+                # constrain to (0,1)
+                gamma = torch.sigmoid(gamma)
+            elif getattr(self, 'jam_gate_param', None) is not None:
+                gamma = torch.sigmoid(self.jam_gate_param).view(1, 1, 1)
+            else:
+                gamma = float(self.jam_gate_strength)
+
+            # apply element-wise gating; gamma broadcast to [B,L,D]
+            x_enc = x_enc * (1.0 - gamma * jam_mask)
         # process in delay domain
         x_enc_r = rearrange(x_enc, 'b l (k o) -> b l k o', o=2)
         x_enc_complex = torch.complex(x_enc_r[:, :, :, 0], x_enc_r[:, :, :, 1])

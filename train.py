@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--lr-step-size', type=int, default=150,
+    parser.add_argument('--lr-step-size', type=int, default=100,
                         help='Step size (epochs) for StepLR; set <=0 to disable decay')
     parser.add_argument('--lr-gamma', type=float, default=0.1,
                         help='Decay factor for StepLR; set <=0 or >=1 to disable decay')
@@ -48,21 +48,24 @@ def parse_args():
     parser.add_argument('--use-jammer', action='store_true', help='Enable synthetic jammer augmentation and mask loss')
     parser.add_argument('--jammer-cfg', type=str, default=None,
                         help='Path to JSON config overriding jammer parameters')
-    parser.add_argument('--lambda-mask', type=float, default=0, help='Initial weight for jammer mask BCE loss')
-    parser.add_argument('--lambda-mask-final', type=float, default=None,
+    parser.add_argument('--lambda-mask', type=float, default=0.3, help='Initial weight for jammer mask BCE loss')
+    parser.add_argument('--lambda-mask-final', type=float, default=1,
                         help='Optional final weight for jammer mask BCE loss after scheduling')
-    parser.add_argument('--lambda-mask-switch', type=int, default=0,
+    parser.add_argument('--lambda-mask-switch', type=int, default=50,
                         help='Epoch index to start transitioning lambda-mask (0-based)')
-    parser.add_argument('--lambda-mask-ramp', type=int, default=0,
+    parser.add_argument('--lambda-mask-ramp', type=int, default=350,
                         help='Number of epochs to linearly ramp lambda-mask from start to final after switch')
     parser.add_argument('--jam-gate-strength', type=float, default=0,
                         help='Target multiplier applied to predicted jam mask when gating inputs')
-    parser.add_argument('--jam-gate-start', type=float, default=0.0,
+    parser.add_argument('--jam-gate-start', type=float, default=0.1,
                         help='Initial jam gate strength before warmup ramp')
-    parser.add_argument('--jam-gate-warmup', type=int, default=100,
+    parser.add_argument('--jam-gate-warmup', type=int, default=0,
                         help='Epochs to linearly ramp jam gate from start to target (0 to disable)')
     parser.add_argument('--jam-head-hidden-ratio', type=float, default=0.75,
                         help='Hidden size ratio for jam head MLP (0-1)')
+    parser.add_argument('--learnable-gate', action='store_true', help='Make jam gate a learnable global parameter')
+    parser.add_argument('--adaptive-gate', action='store_true', help='Enable conditional adaptive per-sample/per-timestep gate head')
+    parser.add_argument('--gate-hidden-ratio', type=float, default=0.125, help='Hidden size ratio for adaptive gate MLP (relative to jam input dim)')
     parser.add_argument('--log-file', type=str, default=None,
                         help='If set, append per-epoch summaries to this file')
     parser.add_argument('--eval-clean', action='store_true',
@@ -140,13 +143,28 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         except Exception as e:
             print(f"[Log] Failed to open log file {args.log_file}: {e}")
     for epoch in range(args.epochs):
+        # determine gate schedule value (legacy) and prefer learned/adaptive gate for display
+        core = _core_model(model)
         if gate_schedule is not None and args.use_jammer:
             gate_value = gate_schedule(epoch)
-            core = _core_model(model)
             if hasattr(core, 'use_jam_head') and core.use_jam_head:
                 core.jam_gate_strength = gate_value
         else:
-            gate_value = getattr(_core_model(model), 'jam_gate_strength', None)
+            gate_value = getattr(core, 'jam_gate_strength', None)
+
+        # Compute a display value for gate: if learnable gate exists, use sigmoid(logit)
+        display_gate = None
+        try:
+            if getattr(core, 'learnable_gate', False) and hasattr(core, 'jam_gate_param'):
+                # learned global scalar gate in (0,1)
+                display_gate = float(torch.sigmoid(core.jam_gate_param).detach().cpu().item())
+            elif getattr(core, 'adaptive_gate', False) and hasattr(core, 'gate_mlp'):
+                # adaptive gate is per-sample/per-timestep; we cannot compute a single scalar here
+                display_gate = float('nan')
+            else:
+                display_gate = float(gate_value) if gate_value is not None else None
+        except Exception:
+            display_gate = float(gate_value) if gate_value is not None else None
 
         if lambda_schedule is not None and args.use_jammer:
             lambda_mask_weight = lambda_schedule(epoch)
@@ -187,7 +205,7 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         mean_train = np.nanmean(np.array(epoch_train_loss)) if epoch_train_loss else float('nan')
         mean_mask = np.nanmean(np.array(epoch_train_mask)) if epoch_train_mask else 0.0
         if args.use_jammer:
-            gate_info = f" gate: {gate_value:.4f}" if gate_value is not None else ""
+            gate_info = f" gate: {display_gate:.4f}" if (display_gate is not None and not (isinstance(display_gate, float) and (display_gate != display_gate))) else " gate: adaptive"
             lambda_info = f" lambda: {lambda_mask_weight:.4f}"
             print(f"Epoch: {epoch + 1}/{args.epochs} training loss: {mean_train:.7f} "
                   f"mask: {mean_mask:.7f} lr: {current_lr:.6e}{gate_info}{lambda_info}")
@@ -282,7 +300,7 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                     f"epoch={epoch+1}, lr={current_lr:.6e}, train_total={mean_train:.7f}, "
                     f"train_mask={mean_mask:.7f}, val_total={v_loss:.7f}, val_nmse={v_nmse:.7f}, "
                     f"val_mask={v_mask:.7f}, val_clean={v_clean if v_clean is not None else float('nan'):.7f}, "
-                    f"gate={gate_value if gate_value is not None else float('nan'):.6f}, "
+                    f"gate={display_gate if display_gate is not None else float('nan'):.6f}, "
                     f"lambda_mask={lambda_mask_weight:.6f}\n"
                 )
                 log_fp.flush()
@@ -348,6 +366,28 @@ def main():
                   jam_gate_strength=args.jam_gate_start if args.use_jammer else args.jam_gate_strength,
                   jam_head_hidden_ratio=args.jam_head_hidden_ratio).to(primary_device)
     load_pretrained(model, args.pretrained_path, primary_device)
+
+    # Configure optional learnable/adaptive gate after model construction so enc_in is known
+    core = _core_model(model)
+    if args.learnable_gate:
+        # initialize jam_gate_param as logit of initial gate value
+        init_val = float(args.jam_gate_start) if args.use_jammer else float(args.jam_gate_strength)
+        init_val = max(1e-6, min(1.0 - 1e-6, init_val))
+        core.jam_gate_param = nn.Parameter(torch.logit(torch.tensor(init_val, dtype=torch.float32, device=primary_device)))
+        core.learnable_gate = True
+        print(f"[Init] Enabled learnable global gate, init={init_val}")
+    if args.adaptive_gate:
+        # build small MLP that maps jam_logits (per timestep) -> scalar gamma in (0,1)
+        gate_input_dim = 2 * core.enc_in
+        gate_hidden = max(1, int(gate_input_dim * float(args.gate_hidden_ratio)))
+        core.gate_mlp = nn.Sequential(
+            nn.Linear(gate_input_dim, gate_hidden),
+            nn.GELU(),
+            nn.Linear(gate_hidden, 1)
+        )
+        core.adaptive_gate = True
+        core.gate_mlp = core.gate_mlp.to(primary_device)
+        print(f"[Init] Enabled adaptive gate MLP (in={gate_input_dim}, hidden={gate_hidden})")
 
     if args.multi_gpu:
         model = torch.nn.DataParallel(model, device_ids=device_ids).to(primary_device)

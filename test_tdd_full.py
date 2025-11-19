@@ -30,7 +30,7 @@ def parse_args():
     # models / device
     ap.add_argument('--device', default='cuda:0')
     ap.add_argument('--models', nargs='*', default=['gpt', 'transformer', 'cnn', 'gru', 'lstm', 'rnn', 'pad', 'np'])
-    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2D3.5_LLM4CP_tdd_ms_sched.pth.last.pth')
+    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2U3.5_LLM4CP_tdd_light_sched.pth.last.pth')
     ap.add_argument('--weights-transformer', default='../Weights/full_shot_tdd/U2U_trans_retrain.pth')
     ap.add_argument('--weights-cnn', default='../Weights/full_shot_tdd/U2U_cnn_retrain.pth')
     ap.add_argument('--weights-gru', default='../Weights/full_shot_tdd/U2U_gru_retrain.pth')
