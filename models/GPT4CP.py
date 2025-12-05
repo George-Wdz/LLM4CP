@@ -229,7 +229,16 @@ class Model(nn.Module):
                 gamma = torch.sigmoid(self.jam_gate_param).view(1, 1, 1)
             else:
                 gamma = float(self.jam_gate_strength)
-
+            # save last gamma for external monitoring (detached)
+            try:
+                # detach to avoid holding computation graph
+                self.last_gamma = gamma.detach()
+            except Exception:
+                # scalar float case (legacy), wrap as tensor on CPU
+                try:
+                    self.last_gamma = torch.tensor(float(gamma))
+                except Exception:
+                    self.last_gamma = None
             # apply element-wise gating; gamma broadcast to [B,L,D]
             x_enc = x_enc * (1.0 - gamma * jam_mask)
         # process in delay domain
@@ -267,7 +276,9 @@ class Model(nn.Module):
 
         dec_out = dec_out[:, -self.pred_len:, :]
         if return_mask:
-            return dec_out, jam_mask
+            # return predicted mask and the computed gamma for external logging
+            # pred_gamma may be tensor of shape [B, L, 1] (adaptive) or scalar tensor (learnable)
+            return dec_out, jam_mask, getattr(self, 'last_gamma', None)
         return dec_out  # [B, L, D]
 
 if __name__ == '__main__':

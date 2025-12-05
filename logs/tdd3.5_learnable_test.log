@@ -207,3 +207,9 @@ epoch=206, lr=1.000000e-05, train_total=0.2786012, train_mask=0.2026743, val_tot
 epoch=207, lr=1.000000e-05, train_total=0.2788623, train_mask=0.2025296, val_total=0.3329986, val_nmse=0.2073496, val_mask=0.2053088, val_clean=nan, gate=0.158407, lambda_mask=0.612000
 epoch=208, lr=1.000000e-05, train_total=0.2792938, train_mask=0.2026296, val_total=0.3328482, val_nmse=0.2074881, val_mask=0.2041696, val_clean=nan, gate=0.158402, lambda_mask=0.614000
 epoch=209, lr=1.000000e-05, train_total=0.2796060, train_mask=0.2024486, val_total=0.3336182, val_nmse=0.2069987, val_mask=0.2055510, val_clean=nan, gate=0.158389, lambda_mask=0.616000
+epoch=210, lr=1.000000e-05, train_total=0.2799821, train_mask=0.2024046, val_total=0.3341704, val_nmse=0.2070573, val_mask=0.2056845, val_clean=nan, gate=0.158379, lambda_mask=0.618000
+epoch=211, lr=1.000000e-05, train_total=0.2803582, train_mask=0.2024007, val_total=0.3359129, val_nmse=0.2087606, val_mask=0.2050844, val_clean=nan, gate=0.158366, lambda_mask=0.620000
+epoch=212, lr=1.000000e-05, train_total=0.2806386, train_mask=0.2022154, val_total=0.3355980, val_nmse=0.2077505, val_mask=0.2055427, val_clean=nan, gate=0.158343, lambda_mask=0.622000
+epoch=213, lr=1.000000e-05, train_total=0.2812406, train_mask=0.2025058, val_total=0.3354851, val_nmse=0.2074535, val_mask=0.2051789, val_clean=nan, gate=0.158328, lambda_mask=0.624000
+epoch=214, lr=1.000000e-05, train_total=0.2816769, train_mask=0.2025277, val_total=0.3378210, val_nmse=0.2092223, val_mask=0.2054292, val_clean=nan, gate=0.158321, lambda_mask=0.626000
+epoch=215, lr=1.000000e-05, train_total=0.2818967, train_mask=0.2023167, val_total=0.3389181, val_nmse=0.2099314, val_mask=0.2053929, val_clean=nan, gate=0.158301, lambda_mask=0.628000

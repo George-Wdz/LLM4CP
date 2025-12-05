@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--lr-step-size', type=int, default=100,
+    parser.add_argument('--lr-step-size', type=int, default=80,
                         help='Step size (epochs) for StepLR; set <=0 to disable decay')
     parser.add_argument('--lr-gamma', type=float, default=0.1,
                         help='Decay factor for StepLR; set <=0 or >=1 to disable decay')
@@ -48,16 +48,16 @@ def parse_args():
     parser.add_argument('--use-jammer', action='store_true', help='Enable synthetic jammer augmentation and mask loss')
     parser.add_argument('--jammer-cfg', type=str, default=None,
                         help='Path to JSON config overriding jammer parameters')
-    parser.add_argument('--lambda-mask', type=float, default=0.3, help='Initial weight for jammer mask BCE loss')
-    parser.add_argument('--lambda-mask-final', type=float, default=1,
+    parser.add_argument('--lambda-mask', type=float, default=0.8, help='Initial weight for jammer mask BCE loss')
+    parser.add_argument('--lambda-mask-final', type=float, default=0.8,
                         help='Optional final weight for jammer mask BCE loss after scheduling')
-    parser.add_argument('--lambda-mask-switch', type=int, default=50,
+    parser.add_argument('--lambda-mask-switch', type=int, default=0,
                         help='Epoch index to start transitioning lambda-mask (0-based)')
-    parser.add_argument('--lambda-mask-ramp', type=int, default=350,
+    parser.add_argument('--lambda-mask-ramp', type=int, default=0,
                         help='Number of epochs to linearly ramp lambda-mask from start to final after switch')
     parser.add_argument('--jam-gate-strength', type=float, default=0,
                         help='Target multiplier applied to predicted jam mask when gating inputs')
-    parser.add_argument('--jam-gate-start', type=float, default=0.1,
+    parser.add_argument('--jam-gate-start', type=float, default=0.55,
                         help='Initial jam gate strength before warmup ramp')
     parser.add_argument('--jam-gate-warmup', type=int, default=0,
                         help='Epochs to linearly ramp jam gate from start to target (0 to disable)')
@@ -171,6 +171,9 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         else:
             lambda_mask_weight = args.lambda_mask
         epoch_train_loss, epoch_train_mask = [], []
+        # trackers for epoch-level gamma averaging
+        train_gamma_sum = 0.0
+        train_gamma_count = 0
         model.train()
         current_lr = optimizer.param_groups[0]['lr']
         for iteration, batch in enumerate(training_loader, 1):
@@ -186,11 +189,38 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
             prev = prev.to(device)
             optimizer.zero_grad()
             outputs = model(prev, None, None, None, return_mask=return_mask)
+            # outputs may be: dec_out OR (dec_out, pred_mask) OR (dec_out, pred_mask, pred_gamma)
+            pred_gamma = None
             if args.use_jammer:
-                pred_m, pred_mask = outputs
+                if isinstance(outputs, tuple):
+                    if len(outputs) == 3:
+                        pred_m, pred_mask, pred_gamma = outputs
+                    elif len(outputs) == 2:
+                        pred_m, pred_mask = outputs
+                    else:
+                        pred_m = outputs[0]
+                        pred_mask = outputs[1] if len(outputs) > 1 else None
+                else:
+                    pred_m = outputs
+                    pred_mask = None
             else:
                 pred_m = outputs
                 pred_mask = None
+
+            # collect pred_gamma (element-weighted) if returned by model
+            try:
+                if pred_gamma is not None:
+                    g = pred_gamma.detach().to('cpu')
+                    train_gamma_sum += float(g.sum().item())
+                    train_gamma_count += int(g.numel())
+                else:
+                    # fallback: try core.last_gamma (may be None under DataParallel)
+                    if hasattr(core, 'last_gamma') and core.last_gamma is not None:
+                        g = core.last_gamma.detach().to('cpu')
+                        train_gamma_sum += float(g.sum().item())
+                        train_gamma_count += int(g.numel())
+            except Exception:
+                pass
 
             loss = criterion_pred(pred_m, pred_t)
             total_loss = loss
@@ -204,11 +234,16 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
 
         mean_train = np.nanmean(np.array(epoch_train_loss)) if epoch_train_loss else float('nan')
         mean_mask = np.nanmean(np.array(epoch_train_mask)) if epoch_train_mask else 0.0
+        # training gamma average
+        if train_gamma_count > 0:
+            train_gamma_avg = train_gamma_sum / float(train_gamma_count)
+        else:
+            train_gamma_avg = float('nan')
         if args.use_jammer:
             gate_info = f" gate: {display_gate:.4f}" if (display_gate is not None and not (isinstance(display_gate, float) and (display_gate != display_gate))) else " gate: adaptive"
             lambda_info = f" lambda: {lambda_mask_weight:.4f}"
             print(f"Epoch: {epoch + 1}/{args.epochs} training loss: {mean_train:.7f} "
-                  f"mask: {mean_mask:.7f} lr: {current_lr:.6e}{gate_info}{lambda_info}")
+                  f"mask: {mean_mask:.7f} lr: {current_lr:.6e}{gate_info}{lambda_info} avg_gamma_train: {train_gamma_avg:.4f}")
         else:
             print(f"Epoch: {epoch + 1}/{args.epochs} training loss: {mean_train:.7f} "
                   f"lr: {current_lr:.6e}")
@@ -216,6 +251,9 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         # Validation
         model.eval()
         epoch_val_loss, epoch_val_mask, epoch_val_nmse = [], [], []
+        # trackers for epoch-level gamma averaging (validation)
+        val_gamma_sum = 0.0
+        val_gamma_count = 0
         with torch.no_grad():
             for iteration, batch in enumerate(validation_loader, 1):
                 if args.use_jammer:
@@ -229,11 +267,36 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                 pred_t = pred_t.to(device)
                 prev = prev.to(device)
                 outputs = model(prev, None, None, None, return_mask=return_mask)
+                pred_gamma = None
                 if args.use_jammer:
-                    pred_m, pred_mask = outputs
+                    if isinstance(outputs, tuple):
+                        if len(outputs) == 3:
+                            pred_m, pred_mask, pred_gamma = outputs
+                        elif len(outputs) == 2:
+                            pred_m, pred_mask = outputs
+                        else:
+                            pred_m = outputs[0]
+                            pred_mask = outputs[1] if len(outputs) > 1 else None
+                    else:
+                        pred_m = outputs
+                        pred_mask = None
                 else:
                     pred_m = outputs
                     pred_mask = None
+
+                # collect validation gamma element-weighted
+                try:
+                    if pred_gamma is not None:
+                        g = pred_gamma.detach().to('cpu')
+                        val_gamma_sum += float(g.sum().item())
+                        val_gamma_count += int(g.numel())
+                    else:
+                        if hasattr(core, 'last_gamma') and core.last_gamma is not None:
+                            g = core.last_gamma.detach().to('cpu')
+                            val_gamma_sum += float(g.sum().item())
+                            val_gamma_count += int(g.numel())
+                except Exception:
+                    pass
                 nmse_loss = criterion_pred(pred_m, pred_t)
                 total_loss = nmse_loss
                 if args.use_jammer and pred_mask is not None and jam_mask is not None:
@@ -270,7 +333,7 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
             save_best_checkpoint(model, args.save_path)
             # also optionally write a numbered best file for easier bookkeeping
             try:
-                best_epoch_path = args.save_path + f".best_epoch{epoch+1}.pth"
+                best_epoch_path = args.save_path
                 torch.save(_core_model(model).state_dict(), best_epoch_path)
             except Exception:
                 # non-fatal: ignore failures to write the auxiliary file
@@ -290,6 +353,15 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                 print(f"[LR] Updated learning rate to {next_lr:.6e}")
 
         # Logging to file
+        # ensure validation gamma average exists for logging
+        try:
+            if 'val_gamma_count' in locals() and val_gamma_count > 0:
+                val_gamma_avg = val_gamma_sum / float(val_gamma_count)
+            else:
+                val_gamma_avg = float('nan')
+        except Exception:
+            val_gamma_avg = float('nan')
+
         if log_fp is not None:
             try:
                 if args.use_jammer and epoch_val_mask:
@@ -301,7 +373,8 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                     f"train_mask={mean_mask:.7f}, val_total={v_loss:.7f}, val_nmse={v_nmse:.7f}, "
                     f"val_mask={v_mask:.7f}, val_clean={v_clean if v_clean is not None else float('nan'):.7f}, "
                     f"gate={display_gate if display_gate is not None else float('nan'):.6f}, "
-                    f"lambda_mask={lambda_mask_weight:.6f}\n"
+                    f"lambda_mask={lambda_mask_weight:.6f}, "
+                    f"train_avg_gamma={train_gamma_avg:.6f}, val_avg_gamma={val_gamma_avg:.6f}\n"
                 )
                 log_fp.flush()
             except Exception as e:
