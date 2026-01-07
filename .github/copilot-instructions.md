@@ -1,27 +1,69 @@
-# Copilot Instructions
+# LLM4CP Copilot Instructions
 
-- **Scope**: LLM4CP fine-tunes GPT-2 for OFDM channel prediction; neural code sits in `models/`, data plumbing in `data.py`, and experiment entrypoints in `train.py` plus `test_*`. 
-- **Model Path**: `models/GPT4CP.py::Model` splits complex histories into delay/frequency CNN stacks, feeds a trimmed GPT-2 block, and projects back to `[batch, pred_len, 2*K]` real-imag tokens.
-- **Frozen GPT-2**: Only positional/token embeddings and LayerNorms update by default; enable MLP tuning via the `mlp` flag when instantiating `Model`.
-- **Jam Head**: `--use-jammer` activates the mask MLP (`jam_head`) and gating strength (`jam_gate_strength`); schedule ramps with `--jam-gate-warmup`, `--lambda-mask-*` CLI knobs.
-- **Input Canon**: `LoadBatch_ofdm` reshapes `(B,T,K*ant)` complex arrays into `(B*32,T,2*K*ant/32)` real tensors; every model and metric assumes this layout.
-- **Dataset Keys**: Training `.mat` files must expose `H_U_his_train`, `H_U_pre_train`, and `H_D_pre_train`; `Dataset_Pro` reshapes them with `einops.rearrange` and injects noise via `data.noise` before normalization.
-- **Sequence Defaults**: `prev_len=16`, `pred_len=4`, `K=48` are hard-wired across loaders, metrics, and tests—change all occurrences if you alter horizons.
-- **Normalization**: Each sample is divided by its RMS after jammer/noise augmentation; skip or duplicate this step and NMSE/SE explode.
-- **Masks**: When jammers run, `Dataset_Pro` returns `(pred, prev, mask)` where `mask` already matches `return_mask=True` expectations in `Model.forward`.
-- **Metrics Pair**: `metrics.NMSELoss` works on real split tensors; `SE_Loss` requires reconverting with `Transform_TDD_FDD`. Keep prediction tensors contiguous to avoid hidden `.reshape` bugs.
-- **Training CLI**: Run `python train.py --train-r-path Dataset/train_data/H_U_his_train.mat --train-t-path Dataset/train_data/H_U_pre_train.mat --device cuda:0 --save-path Weights/U2U_LLM4CP_jam.pth [extra flags]`.
-- **Best Checkpoint**: `train_loop` saves the lowest validation-loss model to `--save-path`; delete stale checkpoints before fresh runs or the loader will reuse them.
-- **LR Groups**: With jammers enabled, jam-head params get `lr * --jam-head-lr-mult`; all other params share the base Adam config (betas 0.9/0.999, weight decay 1e-4).
-- **Multi-GPU**: `--multi-gpu` wraps the model in `nn.DataParallel`; pass `--device-ids 0,1,2` and ensure the primary GPU matches `torch.cuda.set_device`.
-- **Clean Eval**: `--eval-clean` spins up a validation loader without jammers so you can log both jammed and clean NMSE per epoch (written when `--log-file` is provided).
-- **Testing Flow**: `test_tdd_full.py` and `test_fdd_full.py` assume datasets live one level up (`../Dataset/...`) and iterate over velocity bins, writing timestamped CSVs such as `2025_10_13_13_57_05_data_nmse_tdd_full.csv`.
-- **Baselines**: Classical PAD/PronyVec baselines expect complex tensors shaped `[subcarrier, time, Nr*Nt]`; convert with `LoadBatch_ofdm_1/2` exactly as in the scripts when adding new baselines.
-- **Weights Layout**: Author checkpoints live under `Weights/<shot>_<scenario>/`; keep folder names stable because tests map `model_test_enable` directly onto these filenames.
-- **Transformer Cache**: Set `GPT2_LOCAL_PATH` to `hf_models/gpt2` (see README) to work offline; `HF_ENDPOINT` is pinned to `https://hf-mirror.com` in `GPT4CP.py`.
-- **Config Artifacts**: Jammer presets live in `DEFAULT_JAMMER_CFG`; override with `--jammer-cfg configs/jammer_dense.json` etc., and keep `num_subcarriers` divisible into the feature dimension or `apply_jammers` will raise.
-- **Docs Link**: Extended fine-tuning recipes, including PEFT hints and jammer JSON schema, are in `docs/fine_tuning.md`—reference it before inventing new flags.
-- **QuaDRiGa Source**: Synthetic data generation demos are under `dataset_generation/QuanDRiGa-main`; they're MATLAB scripts (not Python) and out-of-scope for automated edits.
-- **Device Defaults**: Hard-coded `torch.device('cuda:1')` values in tests need manual touch-up for other machines; prefer plumbing a CLI/device string rather than editing multiple call sites.
-- **Failure Modes**: Loading checkpoints trained with different antenna tilings (`UQh/UQv/BQh/BQv`) changes feature counts and crashes reshape ops—line up config and weights before inference.
-- **Logging Pattern**: Training prints per-epoch NMSE plus mask/gate stats; when `--log-file` is set it appends CSV-style lines (one per epoch). Respect this format if adding metrics so downstream parsers keep working.
+## Project Overview
+LLM4CP (Large Language Model for Channel Prediction) adapts GPT-2 for OFDM channel prediction. It uses a hybrid architecture with a ResNet-like encoder for feature extraction and a GPT-2 backbone for sequence modeling.
+
+## Architecture & Core Components
+- **Model (`models/GPT4CP.py`)**:
+  - **Structure**: `Res_block` (CNN encoder) -> `GPT2Model` (Backbone) -> Projection to output.
+  - **Input**: Complex channel matrices reshaped to real tensors.
+  - **Jammer Head**: Optional MLP (`jam_head`) for jammer mask prediction, gated by `jam_gate_strength`.
+  - **GPT-2 Loading**: Robust offline loading via `_resolve_local_gpt2_dir`. Checks `GPT2_LOCAL_PATH` env var or `hf_models/gpt2`.
+- **Data Pipeline (`data.py`)**:
+  - **Source**: `.mat` files (MATLAB v7.3) containing `H_U_his_*`, `H_U_pre_*`.
+  - **Processing**: `Dataset_Pro` handles reshaping, noise injection (`noise()`), and jammer simulation (`apply_jammers`).
+  - **Jammers**: Implements Wideband (`wb`), Partial-band (`pb`), Tone, Pulse, and Frequency Hopping (`fh`) jammers. Configured via `DEFAULT_JAMMER_CFG`.
+- **Training (`train.py`)**:
+  - **Loss**: NMSE (Normalized Mean Squared Error) + Optional BCE for jammer mask.
+  - **Optimization**: Adam optimizer. Separate LR for jammer head (`--jam-head-lr-mult`).
+  - **Scheduling**: `StepLR` for learning rate decay.
+
+## Critical Workflows
+
+### Training
+Run `train.py` with paths to `.mat` files.
+```bash
+python train.py \
+  --train-r-path Dataset/train_data/H_U_his_train.mat \
+  --train-t-path Dataset/train_data/H_U_pre_train.mat \
+  --save-path Weights/my_model.pth \
+  --device cuda:0 \
+  --use-jammer --lambda-mask 1.0  # For jammer-aware training
+```
+- **Multi-GPU**: Use `--multi-gpu --device-ids 0,1,2`.
+- **Few-Shot**: Add `--few-shot` flag.
+
+### Testing
+Use `test_tdd_full.py` or `test_fdd_full.py`.
+```bash
+python test_tdd_full.py \
+  --prev-path Dataset/test/H_U_his_test.mat \
+  --pred-path Dataset/test/H_U_pre_test.mat \
+  --weights-gpt Weights/my_model.pth \
+  --use-jammer
+```
+- **Note**: Test scripts iterate over velocity bins and save CSV results.
+
+### Environment Setup
+- **Hugging Face**: Uses `https://hf-mirror.com` by default.
+- **Offline Mode**: Set `GPT2_LOCAL_PATH` to `hf_models/gpt2` to avoid downloads.
+
+## Coding Conventions & Patterns
+- **Tensor Shapes**:
+  - **Raw**: `(Batch, Time, K*Antennas)` complex.
+  - **Model Input**: `(Batch*32, Time, 2*K*Antennas/32)` real. (Reshaped in `LoadBatch_ofdm`).
+  - **Sequence Lengths**: Default `prev_len=16`, `pred_len=4`.
+  - **Subcarriers (K)**: Default `K=64` (configurable).
+- **Normalization**: RMS normalization is critical. `sample = sample / rms`.
+- **Configuration**:
+  - Jammer configs are JSON files (e.g., `configs/jammer_light.json`).
+  - `num_subcarriers` in config must match model `K`.
+- **Device Handling**:
+  - Prefer passing `device` string (e.g., `cuda:0`) over hardcoded `cuda`.
+  - `train.py` uses `torch.nn.DataParallel` for multi-GPU.
+
+## Common Pitfalls
+- **Dimension Mismatch**: Ensure `K`, `UQh`, `UQv`, etc., match between training and inference.
+- **Checkpoint Loading**: `load_pretrained` handles both `Model` and `DataParallel` state dicts.
+- **Randomness**: `data.py` uses a custom `_ensure_rng` to handle seeding for jammers.
+
