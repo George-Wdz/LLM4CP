@@ -4,6 +4,7 @@ import numpy as np
 import hdf5storage
 from einops import rearrange
 from numpy import random
+from typing import Literal
 
 
 DEFAULT_JAMMER_CFG = {
@@ -20,6 +21,37 @@ DEFAULT_JAMMER_CFG = {
     'num_subcarriers': 64,
     'seed': None
 }
+
+
+def apply_angle_dft_flat(H: np.ndarray,
+                         *,
+                         num_subcarriers: int = 64,
+                         ant_v: int = 4,
+                         ant_h: int = 4,
+                         pol: int = 2,
+                         norm: Literal['backward', 'ortho', 'forward'] = 'ortho') -> np.ndarray:
+    """Apply 2D DFT over the UPA (ant_v x ant_h) dimensions.
+
+    The input H is expected in flattened form with shape (B, T, mul), where
+    mul = num_subcarriers * ant_v * ant_h * pol.
+
+    This transform is unitary when norm='ortho', preserving average energy.
+    """
+    if H.ndim != 3:
+        raise ValueError(f"apply_angle_dft_flat expects 3D array (B,T,mul), got shape {H.shape}")
+    B, T, mul = H.shape
+    group = int(ant_v) * int(ant_h) * int(pol)
+    K = int(num_subcarriers)
+    expected = K * group
+    if mul != expected:
+        raise ValueError(
+            f"Angle DFT shape mismatch: mul={mul} but expected {expected}="
+            f"K({K})*ant_v({ant_v})*ant_h({ant_h})*pol({pol})."
+        )
+    H_view = H.reshape(B, T, K, int(ant_v), int(ant_h), int(pol))
+    # 2D DFT across antenna grid (ant_v, ant_h)
+    H_dft = np.fft.fft2(H_view, axes=(3, 4), norm=norm)
+    return H_dft.reshape(B, T, mul)
 
 
 def noise(H, SNR):
@@ -220,7 +252,12 @@ def LoadBatch_mask(mask, num=32):
 class Dataset_Pro(data.Dataset):
     def __init__(self, file_path_r, file_path_t, is_train=1, ir=1, SNR=15, is_U2D=0, is_few=0,
                  train_per=0.9, valid_per=0.1, use_jammer=False, jammer_cfg=None,
-                 return_mask=False, add_awgn=True):
+                 return_mask=False, add_awgn=True,
+                 use_angle_dft: bool = False,
+                 angle_ant_v: int = 4,
+                 angle_ant_h: int = 4,
+                 angle_pol: int = 2,
+                 angle_norm: Literal['backward', 'ortho', 'forward'] = 'ortho'):
         super(Dataset_Pro, self).__init__()
         self.SNR = SNR
         self.ir = ir
@@ -228,6 +265,11 @@ class Dataset_Pro(data.Dataset):
         self.return_mask = return_mask and use_jammer
         self.jammer_cfg = _merge_jammer_cfg(jammer_cfg) if use_jammer else None
         self.add_awgn = add_awgn
+        self.use_angle_dft = bool(use_angle_dft)
+        self.angle_ant_v = int(angle_ant_v)
+        self.angle_ant_h = int(angle_ant_h)
+        self.angle_pol = int(angle_pol)
+        self.angle_norm: Literal['backward', 'ortho', 'forward'] = angle_norm
         H_his_mat = hdf5storage.loadmat(file_path_r)
         for key in ('H_U_his_train', 'H_D_his_train'):
             if key in H_his_mat:
@@ -256,7 +298,7 @@ class Dataset_Pro(data.Dataset):
         else:
             H_his = H_his[:, int(train_per * batch):int((train_per + valid_per) * batch), ...]
             H_pre = H_pre[:, int(train_per * batch):int((train_per + valid_per) * batch), ...]
-        H_his = rearrange(H_his, 'v n L k a b c -> (v n) L (k a b c)')
+        H_his = rearrange(H_his, 'v n L k a b c -> (v n) L (k a b c)') #展平数据为一个特征维，k(64),a(4),b(4),c(2)
         H_pre = rearrange(H_pre, 'v n L k a b c -> (v n) L (k a b c)')
 
         B, prev_len, mul = H_his.shape
@@ -274,6 +316,29 @@ class Dataset_Pro(data.Dataset):
                 H_his[i, ...] = noise(H_his[i, ...], random.rand() * 15 + 5.0)
                 H_pre[i, ...] = noise(H_pre[i, ...], random.rand() * 15 + 5.0)
         jam_mask = np.zeros_like(H_his.real, dtype=np.float32)
+
+        # Optional angle-domain preprocessing: must happen before LoadBatch_ofdm splits the antenna group into batch.
+        if self.use_angle_dft:
+            if self.use_jammer and (self.jammer_cfg is not None):
+                K = int(self.jammer_cfg.get('num_subcarriers', DEFAULT_JAMMER_CFG['num_subcarriers']))
+            else:
+                K = int(DEFAULT_JAMMER_CFG['num_subcarriers'])
+            H_his = apply_angle_dft_flat(
+                H_his,
+                num_subcarriers=K,
+                ant_v=self.angle_ant_v,
+                ant_h=self.angle_ant_h,
+                pol=self.angle_pol,
+                norm=self.angle_norm,
+            )
+            H_pre = apply_angle_dft_flat(
+                H_pre,
+                num_subcarriers=K,
+                ant_v=self.angle_ant_v,
+                ant_h=self.angle_ant_h,
+                pol=self.angle_pol,
+                norm=self.angle_norm,
+            )
         if self.use_jammer:
             H_his, jam_mask = apply_jammers(H_his, self.jammer_cfg)
         std = np.sqrt(np.std(np.abs(H_his) ** 2))
@@ -296,6 +361,7 @@ class Dataset_Pro(data.Dataset):
 
     def __getitem__(self, index):
         if self.return_mask:
+            assert self.jam_mask is not None
             return (self.pred[index, :].float(),
                     self.prev[index, :].float(),
                     self.jam_mask[index, :].float())

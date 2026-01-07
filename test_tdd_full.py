@@ -19,6 +19,28 @@ import hdf5storage
 import tqdm
 from pvec import pronyvec
 from PAD import PAD3
+from typing import Literal
+import collections
+from models.GPT4CP import Model as GPTModel
+
+
+def _angle_dft_2d_upa(x: np.ndarray, *, ant_v: int = 4, ant_h: int = 4,
+                      norm: Literal['backward', 'ortho', 'forward'] = 'ortho') -> np.ndarray:
+    """Apply 2D DFT over the 4x4 UPA antenna grid.
+
+    Args:
+        x: (B, M, L, K) where M=ant_v*ant_h.
+    Returns:
+        Same shape (B, M, L, K) after 2D FFT over the antenna grid.
+    """
+    if x.ndim != 4:
+        raise ValueError(f"angle_dft expects (B,M,L,K), got {x.shape}")
+    B, M, L, K = x.shape
+    if M != ant_v * ant_h:
+        raise ValueError(f"angle_dft mismatch: M={M} but ant_v*ant_h={ant_v*ant_h}")
+    x_view = x.reshape(B, ant_v, ant_h, L, K)
+    x_dft = np.fft.fft2(x_view, axes=(1, 2), norm=norm)
+    return x_dft.reshape(B, M, L, K)
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -30,7 +52,7 @@ def parse_args():
     # models / device
     ap.add_argument('--device', default='cuda:0')
     ap.add_argument('--models', nargs='*', default=['gpt', 'transformer', 'cnn', 'gru', 'lstm', 'rnn', 'pad', 'np'])
-    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2U3.5_LLM4CP_tdd_learnable.pth.epoch400.pth')
+    ap.add_argument('--weights-gpt', default='../Weights/full_shot_tdd/U2U3.5_LLM4CP.pth')
     ap.add_argument('--weights-transformer', default='../Weights/full_shot_tdd/U2U_trans_retrain.pth')
     ap.add_argument('--weights-cnn', default='../Weights/full_shot_tdd/U2U_cnn_retrain.pth')
     ap.add_argument('--weights-gru', default='../Weights/full_shot_tdd/U2U_gru_retrain.pth')
@@ -49,6 +71,8 @@ def parse_args():
     ap.add_argument('--use-jammer', action='store_true')
     ap.add_argument('--jammer-cfg', default=None, help='Path to jammer JSON config')
     ap.add_argument('--jam-gate', type=float, default=None, help='If set and model is GPT4CP with jam head, override jam_gate_strength during inference')
+    ap.add_argument('--use-angle-dft', action='store_true',
+                    help='Apply 2D DFT over 4x4 antenna grid (angle-domain) to both inputs and targets')
     ap.add_argument('--seed', type=int, default=2025, help='Random seed for AWGN and jammer')
     return ap.parse_args()
 
@@ -111,7 +135,31 @@ if __name__ == "__main__":
         print("loading ", i + 1, "th model......", model_test_enable[i])
         model = None
         if model_test_enable[i] not in ['pad', 'pvec', 'np']:
-            model = torch.load(model_path[model_test_enable[i]], map_location=device).to(device)
+            checkpoint = torch.load(model_path[model_test_enable[i]], map_location=device)
+            
+            if isinstance(checkpoint, (dict, collections.OrderedDict)):
+                if model_test_enable[i] == 'gpt':
+                    print("[Info] Detected state_dict for GPT model. Instantiating fresh model...")
+                    # Infer configuration from state_dict keys where possible
+                    has_jam_head = any('jam_head' in k for k in checkpoint.keys())
+                    # Instantiate with expected train.py defaults (UQh=1,UQv=1 => Nt=1 inside model, handled by reshape)
+                    model = GPTModel(
+                        pred_len=pred_len,
+                        prev_len=prev_len,
+                        UQh=1, UQv=1, BQh=1, BQv=1,
+                        use_jam_head=has_jam_head,
+                        jam_head_hidden_ratio=0.75
+                    ).to(device)
+                    # Clean state dict keys (remove module. prefix if present)
+                    new_state_dict = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+                    model.load_state_dict(new_state_dict, strict=False)
+                else:
+                    raise NotImplementedError(f"State dict loading not implemented for {model_test_enable[i]}")
+            else:
+                if isinstance(checkpoint, torch.nn.DataParallel):
+                    checkpoint = checkpoint.module
+                model = checkpoint.to(device)
+
             # optionally override jam gate for GPT-like model
             if model_test_enable[i] == 'gpt' and args.jam_gate is not None and hasattr(model, 'jam_gate_strength'):
                 try:
@@ -130,6 +178,12 @@ if __name__ == "__main__":
             # add AWGN to both inputs and targets (kept for legacy fairness)
             test_data_prev = noise(test_data_prev, args.snr_awgn)
             test_data_pred = noise(test_data_pred, args.snr_awgn)
+
+            # optional angle-domain transform (must match training-time preprocessing for DFT-trained weights)
+            if args.use_angle_dft:
+                test_data_prev = _angle_dft_2d_upa(test_data_prev, ant_v=4, ant_h=4, norm='ortho')
+                test_data_pred = _angle_dft_2d_upa(test_data_pred, ant_v=4, ant_h=4, norm='ortho')
+
             # optionally apply jammers to inputs ONLY, before normalization
             if args.use_jammer:
                 # reshape (B, M, L, K) -> (B, L, M*K) to use apply_jammers with K known
@@ -210,6 +264,8 @@ if __name__ == "__main__":
                         # outputs_AR_freq
                         out = pronyvec(prev, p=8, startidx=prev_len, subcarriernum=K, Nr=Nr, Nt=Nt,
                                        pre_len=pred_len)
+                    else:
+                        raise RuntimeError(f"Unsupported baseline in PAD/PVEC branch: {model_test_enable[i]}")
                     out = LoadBatch_ofdm_1(out)
                     pred = LoadBatch_ofdm_1(pred)
                     loss = criterion(out, pred)

@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import List, Optional
+from typing import Any, List, Optional, cast
 
 import numpy as np
 import torch
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--lr-step-size', type=int, default=80,
+    parser.add_argument('--lr-step-size', type=int, default=100,
                         help='Step size (epochs) for StepLR; set <=0 to disable decay')
     parser.add_argument('--lr-gamma', type=float, default=0.1,
                         help='Decay factor for StepLR; set <=0 or >=1 to disable decay')
@@ -70,6 +70,8 @@ def parse_args():
                         help='If set, append per-epoch summaries to this file')
     parser.add_argument('--eval-clean', action='store_true',
                         help='Run an additional validation pass without jammers (clean)')
+    parser.add_argument('--use-angle-dft', action='store_true',
+                        help='Apply 2D DFT over antenna grid (4x4) before splitting into batch (angle-domain features)')
     parser.add_argument('--is-u2d', action='store_true',
                         help='Use U->D (FDD) target: read H_D_pre_* keys instead of H_U_pre_* in Dataset_Pro')
     return parser.parse_args()
@@ -155,9 +157,10 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
         # Compute a display value for gate: if learnable gate exists, use sigmoid(logit)
         display_gate = None
         try:
-            if getattr(core, 'learnable_gate', False) and hasattr(core, 'jam_gate_param'):
+            jam_gate_param = getattr(core, 'jam_gate_param', None)
+            if getattr(core, 'learnable_gate', False) and isinstance(jam_gate_param, torch.Tensor):
                 # learned global scalar gate in (0,1)
-                display_gate = float(torch.sigmoid(core.jam_gate_param).detach().cpu().item())
+                display_gate = float(torch.sigmoid(jam_gate_param).detach().cpu().item())
             elif getattr(core, 'adaptive_gate', False) and hasattr(core, 'gate_mlp'):
                 # adaptive gate is per-sample/per-timestep; we cannot compute a single scalar here
                 display_gate = float('nan')
@@ -216,9 +219,9 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                 else:
                     # fallback: try core.last_gamma (may be None under DataParallel)
                     if hasattr(core, 'last_gamma') and core.last_gamma is not None:
-                        g = core.last_gamma.detach().to('cpu')
-                        train_gamma_sum += float(g.sum().item())
-                        train_gamma_count += int(g.numel())
+                        g_any = cast(Any, core.last_gamma)
+                        train_gamma_sum += float(g_any.sum().item())
+                        train_gamma_count += int(g_any.numel())
             except Exception:
                 pass
 
@@ -292,9 +295,9 @@ def train_loop(training_loader, validation_loader, model, optimizer, criterion_p
                         val_gamma_count += int(g.numel())
                     else:
                         if hasattr(core, 'last_gamma') and core.last_gamma is not None:
-                            g = core.last_gamma.detach().to('cpu')
-                            val_gamma_sum += float(g.sum().item())
-                            val_gamma_count += int(g.numel())
+                            g_any = cast(Any, core.last_gamma)
+                            val_gamma_sum += float(g_any.sum().item())
+                            val_gamma_count += int(g_any.numel())
                 except Exception:
                     pass
                 nmse_loss = criterion_pred(pred_m, pred_t)
@@ -419,18 +422,21 @@ def main():
     train_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=1, is_U2D=1 if args.is_u2d else 0,
                             is_few=1 if args.few_shot else 0,
                             use_jammer=args.use_jammer, jammer_cfg=jammer_cfg,
-                            return_mask=args.use_jammer)
+                                     return_mask=args.use_jammer,
+                                     use_angle_dft=args.use_angle_dft)
     validate_set = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=1 if args.is_u2d else 0,
                                is_few=0,
                                use_jammer=args.use_jammer, jammer_cfg=jammer_cfg,
-                               return_mask=args.use_jammer)
+                                         return_mask=args.use_jammer,
+                                         use_angle_dft=args.use_angle_dft)
     validate_set_clean = None
     validation_loader_clean = None
     if args.eval_clean and args.use_jammer:
         validate_set_clean = Dataset_Pro(args.train_r_path, args.train_t_path, is_train=0, is_U2D=1 if args.is_u2d else 0,
                                          is_few=0,
                                          use_jammer=False, jammer_cfg=None,
-                                         return_mask=False)
+                                         return_mask=False,
+                                         use_angle_dft=args.use_angle_dft)
 
     model = Model(gpu_id=primary_gpu,
                   pred_len=4, prev_len=16,
@@ -447,18 +453,18 @@ def main():
         init_val = float(args.jam_gate_start) if args.use_jammer else float(args.jam_gate_strength)
         init_val = max(1e-6, min(1.0 - 1e-6, init_val))
         core.jam_gate_param = nn.Parameter(torch.logit(torch.tensor(init_val, dtype=torch.float32, device=primary_device)))
-        core.learnable_gate = True
+        setattr(core, 'learnable_gate', True)
         print(f"[Init] Enabled learnable global gate, init={init_val}")
     if args.adaptive_gate:
         # build small MLP that maps jam_logits (per timestep) -> scalar gamma in (0,1)
-        gate_input_dim = 2 * core.enc_in
+        gate_input_dim = 2 * int(getattr(core, 'enc_in'))
         gate_hidden = max(1, int(gate_input_dim * float(args.gate_hidden_ratio)))
         core.gate_mlp = nn.Sequential(
             nn.Linear(gate_input_dim, gate_hidden),
             nn.GELU(),
             nn.Linear(gate_hidden, 1)
         )
-        core.adaptive_gate = True
+        setattr(core, 'adaptive_gate', True)
         core.gate_mlp = core.gate_mlp.to(primary_device)
         print(f"[Init] Enabled adaptive gate MLP (in={gate_input_dim}, hidden={gate_hidden})")
 

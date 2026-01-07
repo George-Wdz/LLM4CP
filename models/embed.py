@@ -9,7 +9,7 @@ class PositionalEmbedding(nn.Module):
         super(PositionalEmbedding, self).__init__()
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model).float()  # 5000,512
-        pe.require_grad = False
+        pe.requires_grad_(False)
 
         position = torch.arange(0, max_len).float().unsqueeze(1)  # 1,5000
         div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()  #512
@@ -18,6 +18,7 @@ class PositionalEmbedding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
 
         pe = pe.unsqueeze(0)  # 1,5000,512
+        self.pe: torch.Tensor
         self.register_buffer('pe', pe)
 
     def forward(self, x):

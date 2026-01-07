@@ -5,6 +5,7 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
+from typing import Any, cast
 from transformers import GPT2ForSequenceClassification
 from transformers.models.gpt2.modeling_gpt2 import GPT2Model
 from einops import rearrange
@@ -139,43 +140,48 @@ class Model(nn.Module):
                 os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
                 os.environ.setdefault('HF_HUB_OFFLINE', '1')
                 if _has_full_weights(gpt2_local_path):
-                    return GPT2Model.from_pretrained(
+                    return cast(GPT2Model, GPT2Model.from_pretrained(
                         gpt2_local_path,
                         output_attentions=True,
                         output_hidden_states=True,
                         local_files_only=True,
-                    )
+                    ))
                 # Allow random init if explicitly permitted
                 if os.environ.get('GPT2_ALLOW_RANDOM_INIT', '0') == '1':
                     from transformers import GPT2Config
                     cfg = GPT2Config.from_pretrained(gpt2_local_path, local_files_only=True)
-                    return GPT2Model(cfg)
+                    return cast(GPT2Model, GPT2Model(cfg))
                 raise FileNotFoundError(
                     f"GPT-2 local path detected at '{gpt2_local_path}' but 'pytorch_model.bin' is missing. "
                     f"Place the weights file there or set GPT2_ALLOW_RANDOM_INIT=1 to initialize randomly.")
 
             # Fall back to remote identifier (may use mirrors depending on environment)
-            return GPT2Model.from_pretrained(
+            return cast(GPT2Model, GPT2Model.from_pretrained(
                 identifier,
                 output_attentions=True,
                 output_hidden_states=True,
-            )
+            ))
 
+        self.gpt2: GPT2Model
         if gpt_type == 'gpt2-medium':
             self.gpt2 = load_gpt2('gpt2-medium')
-            self.gpt2.h = self.gpt2.h[:gpt_layers]
+            blocks = list(cast(Any, self.gpt2.h)[:gpt_layers])
+            self.gpt2.h = nn.ModuleList(blocks)
             self.gpt_dim = 1024
         elif gpt_type == 'gpt2-large':
             self.gpt2 = load_gpt2('gpt2-large')
-            self.gpt2.h = self.gpt2.h[:gpt_layers]
+            blocks = list(cast(Any, self.gpt2.h)[:gpt_layers])
+            self.gpt2.h = nn.ModuleList(blocks)
             self.gpt_dim = 1280
         elif gpt_type == 'gpt2-xl':
             self.gpt2 = load_gpt2('gpt2-xl')
-            self.gpt2.h = self.gpt2.h[:gpt_layers]
+            blocks = list(cast(Any, self.gpt2.h)[:gpt_layers])
+            self.gpt2.h = nn.ModuleList(blocks)
             self.gpt_dim = 1600
         else:
             self.gpt2 = load_gpt2('gpt2')
-            self.gpt2.h = self.gpt2.h[:gpt_layers]
+            blocks = list(cast(Any, self.gpt2.h)[:gpt_layers])
+            self.gpt2.h = nn.ModuleList(blocks)
             self.gpt_dim = 768
 
         for i, (name, param) in enumerate(self.gpt2.named_parameters()):
@@ -188,7 +194,7 @@ class Model(nn.Module):
 
         if use_gpu:
             device = torch.device('cuda:{}'.format(gpu_id))
-            self.gpt2.to(device=device)
+            cast(nn.Module, self.gpt2).to(device=device)
 
         self.patch_layer = nn.Linear(self.patch_size, self.patch_size)
         self.patch_layer_fre = nn.Linear(self.patch_size, self.patch_size)
@@ -213,34 +219,25 @@ class Model(nn.Module):
         x_enc = (x_enc - mean) / std
         B, L, enc_in = x_enc.shape  # [B, L, D]
         jam_mask = None
-        if self.use_jam_head:
+        if self.jam_head is not None:
             # jam_logits: [B, L, D]
             jam_logits = self.jam_head(x_enc)
             jam_mask = torch.sigmoid(jam_logits)
 
-            # compute gating coefficient gamma
+            # compute gating coefficient gamma (always keep as tensor)
+            gamma_t: torch.Tensor
             if getattr(self, 'adaptive_gate', False) and (self.gate_mlp is not None):
-                # gate_mlp expects input per (b,l,features) and returns scalar per time-step
-                # apply gate MLP to jam_logits -> [B,L,1]
-                gamma = self.gate_mlp(jam_logits)  # expected shape [B,L,1]
-                # constrain to (0,1)
-                gamma = torch.sigmoid(gamma)
-            elif getattr(self, 'jam_gate_param', None) is not None:
-                gamma = torch.sigmoid(self.jam_gate_param).view(1, 1, 1)
+                gamma_t = torch.sigmoid(self.gate_mlp(jam_logits)).to(device=x_enc.device)
+            elif self.jam_gate_param is not None:
+                gamma_t = torch.sigmoid(self.jam_gate_param).view(1, 1, 1).to(device=x_enc.device)
             else:
-                gamma = float(self.jam_gate_strength)
-            # save last gamma for external monitoring (detached)
-            try:
-                # detach to avoid holding computation graph
-                self.last_gamma = gamma.detach()
-            except Exception:
-                # scalar float case (legacy), wrap as tensor on CPU
-                try:
-                    self.last_gamma = torch.tensor(float(gamma))
-                except Exception:
-                    self.last_gamma = None
+                gamma_t = torch.tensor(float(self.jam_gate_strength), device=x_enc.device, dtype=x_enc.dtype).view(1, 1, 1)
+
+            # save last gamma for external monitoring (detached, GPU tensor)
+            self.last_gamma = gamma_t.detach()
+
             # apply element-wise gating; gamma broadcast to [B,L,D]
-            x_enc = x_enc * (1.0 - gamma * jam_mask)
+            x_enc = x_enc * (1.0 - gamma_t * jam_mask)
         # process in delay domain
         x_enc_r = rearrange(x_enc, 'b l (k o) -> b l k o', o=2)
         x_enc_complex = torch.complex(x_enc_r[:, :, :, 0], x_enc_r[:, :, :, 1])
